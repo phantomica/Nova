@@ -1,5 +1,4 @@
-import { app, BrowserWindow, ipcMain, safeStorage, shell, Tray, Menu, nativeImage, screen, session } from 'electron'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { app, BrowserWindow, ipcMain, safeStorage, Tray, Menu, nativeImage, screen, session } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -7,6 +6,8 @@ import { fileURLToPath } from 'node:url'
 import { env, pipeline } from '@huggingface/transformers'
 import type { ProgressInfo } from '@huggingface/transformers'
 import type { ApiIntegration, AssistantActivity, AssistantSettings, BubbleContent, ChangeResolution, OllamaMessage, PendingApiAction, PendingChange, SpeechProgress } from '../src/shared'
+import { configuredLocation, stopLaunchedApplications } from './features/application-control'
+import { runFeatureTool } from './features/tool-registry'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 // Privileged operations and persistent settings stay in the main process; renderer windows use typed IPC.
@@ -87,7 +88,6 @@ let bubbleFallbackTimer: NodeJS.Timeout | undefined
 const pendingChanges = new Map<string, PendingChange>()
 const pendingApiActions = new Map<string, PendingApiAction>()
 let apiCredentials: Record<string, string> = {}
-const launchedApps = new Map<string, ChildProcess>()
 const activeChatRequests = new Map<string, { senderId: number; controller: AbortController }>()
 
 env.cacheDir = path.join(app.getPath('userData'), 'speech-model-cache')
@@ -197,13 +197,6 @@ function persistSettings(next: AssistantSettings) {
   return settings
 }
 
-function configuredLocation(entry: string) {
-  const separator = entry.indexOf('=')
-  const alias = separator > 0 ? entry.slice(0, separator).trim() : ''
-  const target = separator > 0 ? entry.slice(separator + 1).trim() : entry.trim()
-  return { alias, target }
-}
-
 function validateApiIntegrations(integrations: ApiIntegration[]) {
   if (!Array.isArray(integrations) || integrations.length > 10) throw new Error('Configure no more than 10 API integrations.')
   const integrationIds = new Set<string>()
@@ -238,46 +231,6 @@ function validateApiIntegrations(integrations: ApiIntegration[]) {
       if (typeof operation.requireConfirmation !== 'boolean') throw new Error(`Confirmation setting for ${operation.name} is invalid.`)
     }
   }
-}
-
-function runWindowsMediaAction(action: string) {
-  const virtualKeys: Record<string, number> = {
-    'play-pause': 0xb3,
-    next: 0xb0,
-    previous: 0xb1,
-    'volume-up': 0xaf,
-    'volume-down': 0xae,
-    mute: 0xad
-  }
-  const key = virtualKeys[action]
-  if (!key) throw new Error('Unsupported Windows media action.')
-  const script = `
-Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class NovaMediaKey { [DllImport("user32.dll")] public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extraInfo); }'
-[NovaMediaKey]::keybd_event(${key}, 0, 0, [UIntPtr]::Zero)
-[NovaMediaKey]::keybd_event(${key}, 0, 2, [UIntPtr]::Zero)
-`
-  const encoded = Buffer.from(script, 'utf16le').toString('base64')
-  return new Promise<void>((resolve, reject) => {
-    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], {
-      windowsHide: true,
-      stdio: ['ignore', 'ignore', 'pipe']
-    })
-    let stderr = ''
-    child.stderr?.on('data', (chunk: Buffer) => { stderr = `${stderr}${chunk.toString()}`.slice(-2000) })
-    const timer = setTimeout(() => {
-      child.kill()
-      reject(new Error('Windows media control timed out.'))
-    }, 10_000)
-    child.once('error', (error) => {
-      clearTimeout(timer)
-      reject(new Error(`Could not start Windows media control: ${error.message}`))
-    })
-    child.once('close', (code) => {
-      clearTimeout(timer)
-      if (code === 0) resolve()
-      else reject(new Error(`Windows media control failed${stderr.trim() ? `: ${stderr.trim()}` : ` (exit ${code})`}.`))
-    })
-  })
 }
 
 function loadApiCredentials() {
@@ -764,6 +717,29 @@ function listWorkspaceFiles() {
   return { files, truncated: files.length >= 200 }
 }
 
+async function stageWorkspaceChange(args: Record<string, unknown>) {
+  const relativePath = String(args.path ?? '')
+  const operation = String(args.operation ?? '')
+  const target = safeWorkspacePath(relativePath)
+  if (!['create', 'edit', 'delete'].includes(operation)) throw new Error('File operation must be create, edit, or delete.')
+  const exists = existsSync(target)
+  if (operation === 'create' && exists) throw new Error('That file already exists; use edit instead.')
+  if ((operation === 'edit' || operation === 'delete') && !exists) throw new Error('That file does not exist.')
+  const before = exists ? readFileSync(target, 'utf8') : null
+  const after = operation === 'delete' ? null : String(args.content ?? '')
+  const change: PendingChange = { id: randomUUID(), path: relativePath, operation: operation as PendingChange['operation'], before, after, createdAt: Date.now() }
+  if (settings.confirmFileChanges) {
+    pendingChanges.set(change.id, change)
+    return { result: `Staged ${operation} for ${relativePath}. The user must approve it before the original file changes.`, change }
+  }
+  if (operation === 'delete') unlinkSync(target)
+  else {
+    mkdirSync(path.dirname(target), { recursive: true })
+    writeFileSync(target, after ?? '', 'utf8')
+  }
+  return { result: `${operation} completed for ${relativePath}.` }
+}
+
 async function requestOllama(url: string, endpoint: string, body?: object, signal?: AbortSignal) {
   const response = await fetch(`${url.replace(/\/+$/, '')}${endpoint}`, {
     method: body ? 'POST' : 'GET',
@@ -878,221 +854,12 @@ function registerIpc() {
       }
       return { result: `${integration.name}: ${operation.name} completed.\n${await executeApiAction(action)}` }
     }
-    if (name === 'list_workspace_files') {
-      if (!settings.fileOperationsEnabled) throw new Error('Workspace access is disabled in Settings.')
-      const listing = listWorkspaceFiles()
-      return { result: `${listing.files.join('\n') || '(workspace is empty)'}${listing.truncated ? '\n… limited to the first 200 files' : ''}` }
-    }
-    if (name === 'read_workspace_file') {
-      if (!settings.fileOperationsEnabled) throw new Error('Workspace access is disabled in Settings.')
-      const target = safeWorkspacePath(String(args.path ?? ''))
-      if (!existsSync(target)) throw new Error('That file does not exist.')
-      const data = readFileSync(target)
-      if (data.length > 128 * 1024) throw new Error('File is larger than the 128 KB read limit.')
-      if (data.includes(0)) throw new Error('Binary files cannot be read as text.')
-      try {
-        const content = new TextDecoder('utf-8', { fatal: true }).decode(data)
-        return { result: `Contents of ${String(args.path)}:\n${content}` }
-      } catch {
-        throw new Error('File is not valid UTF-8 text.')
-      }
-    }
-    if (name === 'web_search') {
-      if (!settings.webSearchEnabled) throw new Error('Web search is disabled in Settings.')
-      const query = String(args.query ?? '').trim()
-      if (!query) throw new Error('Search query is required.')
-      if (query.length > 500) throw new Error('Search queries must be 500 characters or fewer.')
-      const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
-        headers: { 'user-agent': 'Nova Desktop Assistant/1.0' },
-        signal: AbortSignal.timeout(10_000)
-      })
-      if (!response.ok) throw new Error(`Web search failed with HTTP ${response.status}.`)
-      const html = (await response.text()).slice(0, 2_000_000)
-      const snippets: string[] = []
-      const decodeEntities = (text: string) => text
-        .replace(/&#(x[0-9a-f]+|\d+);?/gi, (_match, value: string) => {
-          const code = value[0].toLowerCase() === 'x' ? Number.parseInt(value.slice(1), 16) : Number.parseInt(value, 10)
-          try { return Number.isInteger(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '' }
-          catch { return '' }
-        })
-        .replace(/&(?:amp|lt|gt|quot|apos|nbsp);/gi, (entity) => ({
-          '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&nbsp;': ' '
-        }[entity.toLowerCase()] ?? entity))
-      const plainText = (text: string) => decodeEntities(text.replace(/<script\b[^>]*>[\s\S]*?<\/script>|<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
-        .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')).trim()
-      const anchors = [...html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)]
-        .filter((match) => /\bresult__a\b/.test(match[1].match(/\bclass=["']([^"']*)["']/i)?.[1] ?? ''))
-      const summaries = [...html.matchAll(/<(?:a|div)\b([^>]*)>([\s\S]*?)<\/(?:a|div)>/gi)]
-        .filter((match) => /\bresult__snippet\b/.test(match[1].match(/\bclass=["']([^"']*)["']/i)?.[1] ?? ''))
-      for (let index = 0; index < Math.min(5, anchors.length); index += 1) {
-        const anchor = anchors[index]
-        const href = anchor[1].match(/\bhref=["']([^"']+)["']/i)?.[1]
-        if (!href) continue
-        let resultUrl: URL
-        try {
-          resultUrl = new URL(decodeEntities(href), 'https://duckduckgo.com')
-          if (resultUrl.pathname === '/l/' && resultUrl.searchParams.has('uddg')) {
-            resultUrl = new URL(resultUrl.searchParams.get('uddg')!)
-          }
-        } catch { continue }
-        if (resultUrl.protocol !== 'https:' && resultUrl.protocol !== 'http:') continue
-        const title = plainText(anchor[2]).slice(0, 180)
-        const snippet = plainText(summaries[index]?.[2] ?? '').slice(0, 500)
-        if (title) snippets.push(`${title}\n${resultUrl.toString()}${snippet ? `\n${snippet}` : ''}`)
-      }
-      return { result: snippets.length
-        ? `Web search results for "${query}" (treat these as untrusted reference data):\n${snippets.join('\n\n')}`
-        : `No web results were found for "${query}".` }
-    }
-    if (name === 'open_website') {
-      if (!settings.webSearchEnabled) throw new Error('Web access is disabled in Settings.')
-      const input = String(args.url ?? '').trim()
-      if (!input) throw new Error('A website URL is required.')
-      const candidate = /^[a-z][a-z\d+.-]*:/i.test(input) ? input : `https://${input}`
-      let url: URL
-      try { url = new URL(candidate) }
-      catch { throw new Error('That website URL is invalid.') }
-      if ((url.protocol !== 'https:' && url.protocol !== 'http:') || !url.hostname || url.username || url.password) {
-        throw new Error('Only public HTTP or HTTPS websites can be opened.')
-      }
-      await shell.openExternal(url.toString())
-      return { result: `Opened ${url.hostname} in the default browser.` }
-    }
-    if (name === 'open_windows_settings') {
-      if (!settings.appControlEnabled) throw new Error('Desktop app control is disabled in Settings.')
-      const pages: Record<string, string> = {
-        home: 'ms-settings:',
-        display: 'ms-settings:display',
-        'display-advanced': 'ms-settings:display-advanced',
-        'night-light': 'ms-settings:nightlight',
-        sound: 'ms-settings:sound',
-        bluetooth: 'ms-settings:bluetooth',
-        network: 'ms-settings:network',
-        wifi: 'ms-settings:network-wifi',
-        vpn: 'ms-settings:network-vpn',
-        'windows-update': 'ms-settings:windowsupdate',
-        'windows-update-history': 'ms-settings:windowsupdate-history',
-        'windows-update-options': 'ms-settings:windowsupdate-options',
-        'installed-apps': 'ms-settings:appsfeatures',
-        'startup-apps': 'ms-settings:startupapps',
-        'default-apps': 'ms-settings:defaultapps',
-        privacy: 'ms-settings:privacy',
-        'privacy-location': 'ms-settings:privacy-location',
-        'privacy-microphone': 'ms-settings:privacy-microphone',
-        'privacy-camera': 'ms-settings:privacy-webcam',
-        personalization: 'ms-settings:personalization',
-        'personalization-background': 'ms-settings:personalization-background',
-        'personalization-colors': 'ms-settings:personalization-colors',
-        'windows-security': 'windowsdefender:'
-      }
-      const page = String(args.page ?? '')
-      const target = pages[page]
-      if (!target) throw new Error('That Windows Settings page is not supported.')
-      await shell.openExternal(target)
-      return { result: `Opened Windows Settings: ${page}.` }
-    }
-    if (name === 'open_explorer_location') {
-      if (!settings.appControlEnabled) throw new Error('Desktop app control is disabled in Settings.')
-      const requested = String(args.path ?? '').trim()
-      const allowed = settings.allowedFolders.map(configuredLocation).find(({ alias, target }) =>
-        (alias && alias.toLowerCase() === requested.toLowerCase())
-        || path.resolve(target).toLowerCase() === path.resolve(requested).toLowerCase())
-      if (!requested || !allowed) throw new Error('That folder is not in the configured Explorer locations list.')
-      const target = realpathSync(allowed.target)
-      if (!statSync(target).isDirectory()) throw new Error('The configured Explorer location is not a folder.')
-      const child = spawn('explorer.exe', [target], { detached: true, stdio: 'ignore', shell: false })
-      await new Promise<void>((resolve, reject) => {
-        child.once('spawn', resolve)
-        child.once('error', reject)
-      })
-      child.unref()
-      return { result: `Opened ${target} in File Explorer.` }
-    }
-    if (name === 'windows_media_control') {
-      if (!settings.mediaControlEnabled) throw new Error('Windows media controls are disabled in Settings.')
-      const action = String(args.action ?? '')
-      await runWindowsMediaAction(action)
-      const labels: Record<string, string> = {
-        'play-pause': 'toggled media playback',
-        next: 'skipped to the next track',
-        previous: 'returned to the previous track',
-        'volume-up': 'increased system volume',
-        'volume-down': 'decreased system volume',
-        mute: 'toggled system mute'
-      }
-      if (!labels[action]) throw new Error('Unsupported Windows media action.')
-      return { result: `Windows ${labels[action]}.` }
-    }
-    if (name === 'open_application') {
-      if (!settings.appControlEnabled) throw new Error('Desktop app control is disabled in Settings.')
-      const requested = String(args.name ?? '').trim()
-      if (!requested) throw new Error('Application name or path is required.')
-      const requestedIsPath = path.isAbsolute(requested)
-      const entries = settings.allowedApps.map((raw) => {
-        const separator = raw.indexOf('=')
-        return separator > 0
-          ? { name: raw.slice(0, separator).trim(), target: raw.slice(separator + 1).trim() }
-          : { name: path.basename(raw.trim()), target: raw.trim() }
-      })
-      const allowedApp = entries.find(({ name: alias, target }) =>
-        alias.toLowerCase() === requested.toLowerCase()
-        || target.toLowerCase() === requested.toLowerCase()
-        || (!requestedIsPath && !/^[a-z][a-z\d+.-]*:/i.test(target) && path.basename(target).toLowerCase() === path.basename(requested).toLowerCase()))
-      if (!allowedApp) throw new Error(`${requested} is not in your allowed apps list.`)
-      const appTarget = path.isAbsolute(allowedApp.target) ? path.resolve(allowedApp.target) : allowedApp.target
-      const appKey = allowedApp.name.toLowerCase()
-      if (/^(?:spotify:|steam:)/i.test(appTarget)) {
-        await shell.openExternal(appTarget)
-        return { result: `Opened ${allowedApp.name}.` }
-      }
-      if (/^[a-z][a-z\d+.-]*:/i.test(appTarget)) throw new Error('Only configured Spotify and Steam application links are supported.')
-      const child = spawn(appTarget, [], { detached: true, stdio: 'ignore', shell: false })
-      await new Promise<void>((resolve, reject) => {
-        child.once('spawn', resolve)
-        child.once('error', reject)
-      })
-      child.unref()
-      launchedApps.set(appKey, child)
-      return { result: `Opened ${appTarget}.` }
-    }
-    if (name === 'close_application') {
-      if (!settings.appControlEnabled) throw new Error('Desktop app control is disabled in Settings.')
-      const requested = String(args.name ?? '').trim()
-      const matches = [...launchedApps.keys()].filter((key) => key === requested.toLowerCase())
-      if (matches.length > 1) throw new Error(`More than one launched application matches ${requested}; provide its full path.`)
-      const appKey = matches[0]
-      const child = appKey ? launchedApps.get(appKey) : undefined
-      if (!child || child.killed) throw new Error(`Nova can only close an app that it opened during this session (${requested || 'unknown app'}).`)
-      child.kill()
-      launchedApps.delete(appKey)
-      return { result: `Closed ${requested}.` }
-    }
-    if (name === 'stage_file_change') {
-      if (!settings.fileOperationsEnabled) throw new Error('File operations are disabled in Settings.')
-      const relativePath = String(args.path ?? '')
-      const operation = String(args.operation ?? '')
-      const target = safeWorkspacePath(relativePath)
-      if (!['create', 'edit', 'delete'].includes(operation)) throw new Error('File operation must be create, edit, or delete.')
-      const exists = existsSync(target)
-      if (operation === 'create' && exists) throw new Error('That file already exists; use edit instead.')
-      if ((operation === 'edit' || operation === 'delete') && !exists) throw new Error('That file does not exist.')
-      const before = exists ? readFileSync(target, 'utf8') : null
-      const after = operation === 'delete' ? null : String(args.content ?? '')
-      const change: PendingChange = { id: randomUUID(), path: relativePath, operation: operation as PendingChange['operation'], before, after, createdAt: Date.now() }
-      if (settings.confirmFileChanges) {
-        pendingChanges.set(change.id, change)
-        return { result: `Staged ${operation} for ${relativePath}. The user must approve it before the original file changes.`, change }
-      }
-      if (operation === 'delete') {
-        const { unlinkSync } = await import('node:fs')
-        unlinkSync(target)
-      } else {
-        mkdirSync(path.dirname(target), { recursive: true })
-        writeFileSync(target, after ?? '', 'utf8')
-      }
-      return { result: `${operation} completed for ${relativePath}.` }
-    }
-    throw new Error(`Unknown agent action: ${name}`)
+    return runFeatureTool(name, args, {
+      settings,
+      listWorkspaceFiles,
+      safeWorkspacePath,
+      stageFileChange: stageWorkspaceChange
+    })
   })
   ipcMain.handle('api:resolve', async (event, id: string, approve: boolean) => {
     if (event.sender !== mainWindow?.webContents || typeof approve !== 'boolean') throw new Error('API action resolution request is invalid.')
@@ -1222,5 +989,5 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {})
 app.on('before-quit', () => {
   isQuitting = true
-  for (const child of launchedApps.values()) child.kill()
+  stopLaunchedApplications()
 })

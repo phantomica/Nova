@@ -5,7 +5,7 @@ import {
   Volume2, VolumeX, X
 } from 'lucide-react'
 import type { ActionTrace, AssistantActivity, AssistantSettings, OllamaMessage, PendingApiAction, PendingChange } from '../shared'
-import { apiTools, tools } from './agent-tools'
+import { apiTools, enabledTools } from './agent-tools'
 import { ChatText, decodeForWhisper, plainTextForSpeech } from './formatting'
 import { ActionTraceCard, ChangeCard, FloatingButton, SettingsPanel, SpeechBubble, assistantSystemPrompt } from './components'
 
@@ -147,14 +147,9 @@ function ChatApp() {
     const history = [...messageHistory.current, { role: 'user' as const, content: text }]
     messageHistory.current = history
     try {
-      const enabledTools: object[] = tools.filter(({ function: tool }) => {
-        if (tool.name === 'web_search' || tool.name === 'open_website') return settings.webSearchEnabled
-        if (tool.name === 'open_application' || tool.name === 'close_application' || tool.name === 'open_windows_settings' || tool.name === 'open_explorer_location') return settings.appControlEnabled
-        if (tool.name === 'windows_media_control') return settings.mediaControlEnabled
-        return settings.fileOperationsEnabled
-      })
-      if (settings.apiAccessEnabled) enabledTools.push(...apiTools(settings.apiIntegrations))
-      let response = await window.desktop.chat(requestId, settings.ollamaUrl, settings.model, history, enabledTools)
+      const availableTools: object[] = enabledTools(settings)
+      if (settings.apiAccessEnabled) availableTools.push(...apiTools(settings.apiIntegrations))
+      let response = await window.desktop.chat(requestId, settings.ollamaUrl, settings.model, history, availableTools)
       if (cancelledChatRequestsRef.current.has(requestId)) return
       history.push(response)
       // Each model round may request tools; the turn cap prevents unbounded action loops.
@@ -187,7 +182,7 @@ function ChatApp() {
           }
         }
         if (cancelledChatRequestsRef.current.has(requestId)) return
-        response = await window.desktop.chat(requestId, settings.ollamaUrl, settings.model, history, enabledTools)
+        response = await window.desktop.chat(requestId, settings.ollamaUrl, settings.model, history, availableTools)
         if (cancelledChatRequestsRef.current.has(requestId)) return
         history.push(response)
       }

@@ -33,18 +33,18 @@ After changing Electron's main or preload code, quit any existing Nova windows a
 
 ## Code map
 
-- `electron/main.ts` owns settings and credentials, Ollama and Whisper requests, desktop windows, and privileged actions such as file access and program launching.
+- `electron/main.ts` owns settings and credentials, Ollama and Whisper requests, desktop windows, and the privileged `tool:run` boundary. Agent implementations are auto-discovered from `electron/features/*.feature.ts`; focused platform helpers (for example app launching or Windows media keys) can live beside them.
 - `electron/preload.ts` exposes the narrow, typed `window.desktop` bridge. Keep Node.js and Electron APIs out of the renderer; new privileged features should have an IPC handler and a matching bridge method.
 - `src/ui/App.tsx` coordinates chat history, voice capture, Ollama requests, and action traces. The UI-only settings, approval, floating-button, and bubble components live in `src/ui/components.tsx`.
-- `src/ui/agent-tools.ts` owns the schemas sent to Ollama; each fixed tool name must match a handler in `electron/main.ts`. API schemas are generated from the enabled integrations.
+- `src/ui/agent-tools.ts` auto-discovers feature-owned schemas and settings gates from `src/ui/agent-tools/*.feature.ts`. Feature tool handlers are independently auto-discovered in `electron/features/*.feature.ts`; matching names connect schemas to implementations. API schemas are generated from the enabled integrations.
 - `src/ui/formatting.tsx` contains the supported Markdown renderer, speech-text cleanup, bounded diff generation, and audio resampling helper.
 - `src/shared.ts` defines the settings, messages, and bridge types shared by the main and renderer processes; `src/ui/styles.css` contains the interface styling.
 
 ### Adding an agent capability
 
-1. Add the model-facing tool schema to `src/ui/agent-tools.ts`, including a clear description, argument schema, and a corresponding feature gate in `ChatApp`.
-2. Implement the operation in the `tool:run` handler in `electron/main.ts`. Treat all model-supplied arguments as untrusted and enforce permissions, allowlists, and confirmation requirements in the main process.
-3. Add or update types in `src/shared.ts` and expose a preload method only when the renderer needs a direct IPC operation outside the generic tool runner.
+1. Add a `*.feature.ts` schema module under `src/ui/agent-tools/`, exporting `agentToolFeature` with `tools` and an `enabled(settings)` gate.
+2. Add a matching `*.feature.ts` implementation under `electron/features/`, exporting a `toolHandlers` map keyed by the schema tool names. The registry discovers these modules automatically; no edits to `App.tsx`, `main.ts`, or a central tool list are needed.
+3. Treat model-supplied arguments as untrusted and enforce permissions, allowlists, and confirmation requirements inside the main-process handler. Add settings/types or a preload method only when the feature truly needs those surfaces.
 4. Keep user-facing controls and safety behavior documented here, then run `npm run typecheck` and `npm run build`.
 
 ## Safety boundaries
