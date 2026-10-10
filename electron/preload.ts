@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AssistantActivity, AssistantSettings, BubbleContent, ChangeResolution, DesktopApi, OllamaMessage, SpeechProgress } from '../src/shared'
+import type { ApplicationLaunchResolution, AssistantActivity, AssistantSettings, BubbleContent, ChangeResolution, DesktopApi, OllamaMessage, SpeechProgress } from '../src/shared'
 
 const desktop: DesktopApi = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
@@ -27,6 +27,12 @@ const desktop: DesktopApi = {
   endFloatingDrag: () => ipcRenderer.send('assistant:drag-end'),
   runTool: (name, args) => ipcRenderer.invoke('tool:run', name, args),
   resolveApiAction: (id, approve) => ipcRenderer.invoke('api:resolve', id, approve),
+  resolveApplicationLaunch: (id, approve) => ipcRenderer.invoke('application:resolve-launch', id, approve),
+  onApplicationLaunchResolved: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, resolution: ApplicationLaunchResolution) => listener(resolution)
+    ipcRenderer.on('application:launch-resolved', handler)
+    return () => ipcRenderer.removeListener('application:launch-resolved', handler)
+  },
   setApiCredential: (integrationId, token) => ipcRenderer.invoke('api:credential:set', integrationId, token),
   clearApiCredential: (integrationId) => ipcRenderer.invoke('api:credential:clear', integrationId),
   getApiCredentialStatuses: (integrationIds) => ipcRenderer.invoke('api:credential:statuses', integrationIds),
@@ -40,7 +46,7 @@ const desktop: DesktopApi = {
   },
   openAssistant: () => ipcRenderer.send('assistant:open'),
   hideAssistant: () => ipcRenderer.send('assistant:hide'),
-  publishBubble: (text, changes) => ipcRenderer.send('bubble:publish', text, changes),
+  publishBubble: (text, changes, applicationLaunches) => ipcRenderer.send('bubble:publish', text, changes, applicationLaunches),
   getBubbleContent: () => ipcRenderer.invoke('bubble:get'),
   onBubbleContent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, content: BubbleContent) => listener(content)

@@ -1,12 +1,13 @@
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, Tray, Menu, nativeImage, screen, session } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { env, pipeline } from '@huggingface/transformers'
 import type { ProgressInfo } from '@huggingface/transformers'
-import type { ApiIntegration, AssistantActivity, AssistantSettings, BubbleContent, ChangeResolution, OllamaMessage, PendingApiAction, PendingChange, SpeechProgress } from '../src/shared'
-import { configuredLocation, stopLaunchedApplications } from './features/application-control'
+import type { ApiIntegration, AssistantActivity, AssistantSettings, BubbleContent, ChangeResolution, OllamaMessage, PendingApiAction, PendingApplicationLaunch, PendingChange, SpeechProgress } from '../src/shared'
+import { configuredLocation, openApplication, stopLaunchedApplications } from './features/application-control'
+import { browseAccessibleFiles, readAccessibleFile, resolveAllowedFilePath, searchAccessibleFiles } from './features/file-access'
 import { runFeatureTool } from './features/tool-registry'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -45,6 +46,7 @@ const defaults: AssistantSettings = {
   diagnosticsDisksEnabled: true,
   fileOperationsEnabled: true,
   appControlEnabled: true,
+  askBeforeUnlistedAppLaunch: false,
   mediaControlEnabled: true,
   apiAccessEnabled: true,
   allowedApps: [
@@ -90,6 +92,7 @@ let folderPickerOpen = false
 let tray: Tray | undefined
 let latestBubble = ''
 let latestBubbleChanges: PendingChange[] = []
+let latestBubbleApplicationLaunches: PendingApplicationLaunch[] = []
 let bubbleSide: BubbleContent['side'] = 'left'
 let latestBubbleIsStatus = false
 let assistantActivity: AssistantActivity = 'idle'
@@ -104,8 +107,19 @@ let floatingDragOrigin: { pointerX: number; pointerY: number; windowX: number; w
 let bubbleFallbackTimer: NodeJS.Timeout | undefined
 const pendingChanges = new Map<string, PendingChange>()
 const pendingApiActions = new Map<string, PendingApiAction>()
+const pendingApplicationLaunches = new Map<string, PendingApplicationLaunch>()
+const resolvingApplicationLaunches = new Map<string, { approve: boolean; promise: Promise<string> }>()
+const resolvedApplicationLaunches = new Map<string, { approve: boolean; result: string }>()
 let apiCredentials: Record<string, string> = {}
 const activeChatRequests = new Map<string, { senderId: number; controller: AbortController }>()
+
+function rememberApplicationLaunchResolution(id: string, approve: boolean, result: string) {
+  resolvedApplicationLaunches.set(id, { approve, result })
+  if (resolvedApplicationLaunches.size > 100) {
+    const oldestId = resolvedApplicationLaunches.keys().next().value
+    if (oldestId) resolvedApplicationLaunches.delete(oldestId)
+  }
+}
 
 function updateTrayBranding() {
   if (!tray) return
@@ -183,6 +197,9 @@ function loadSettings() {
         diagnosticsProcessesEnabled: typeof loaded.diagnosticsProcessesEnabled === 'boolean' ? loaded.diagnosticsProcessesEnabled : defaults.diagnosticsProcessesEnabled,
         diagnosticsNetworkEnabled: typeof loaded.diagnosticsNetworkEnabled === 'boolean' ? loaded.diagnosticsNetworkEnabled : defaults.diagnosticsNetworkEnabled,
         diagnosticsDisksEnabled: typeof loaded.diagnosticsDisksEnabled === 'boolean' ? loaded.diagnosticsDisksEnabled : defaults.diagnosticsDisksEnabled,
+        askBeforeUnlistedAppLaunch: typeof loaded.askBeforeUnlistedAppLaunch === 'boolean'
+          ? loaded.askBeforeUnlistedAppLaunch
+          : defaults.askBeforeUnlistedAppLaunch,
         allowedFolders: Array.isArray(loaded.allowedFolders) ? loaded.allowedFolders.filter((folder): folder is string => typeof folder === 'string') : defaults.allowedFolders,
         allowedFolderSubfolders: Array.isArray(loaded.allowedFolderSubfolders)
           ? loaded.allowedFolderSubfolders.filter((folder): folder is string => typeof folder === 'string')
@@ -234,6 +251,7 @@ function persistSettings(next: AssistantSettings) {
   }
   if (!['on-open', 'on-restart', 'never'].includes(next.chatSizeBehavior)) throw new Error('Chat window size behavior is invalid.')
   if (typeof next.apiAccessEnabled !== 'boolean') throw new Error('API access setting is invalid.')
+  if (typeof next.askBeforeUnlistedAppLaunch !== 'boolean') throw new Error('Unlisted application approval setting is invalid.')
   if (typeof next.mediaControlEnabled !== 'boolean') throw new Error('Windows media control setting is invalid.')
   if (typeof next.systemDiagnosticsEnabled !== 'boolean' || typeof next.diagnosticsPerformanceEnabled !== 'boolean'
     || typeof next.diagnosticsProcessesEnabled !== 'boolean' || typeof next.diagnosticsNetworkEnabled !== 'boolean'
@@ -587,6 +605,7 @@ function scheduleBubbleDismissal() {
     bubbleHideTimer = undefined
     latestBubble = ''
     latestBubbleChanges = []
+    latestBubbleApplicationLaunches = []
     bubbleWindow?.hide()
   }, settings.bubbleDurationSeconds * 1000)
 }
@@ -610,6 +629,7 @@ function scheduleBubbleFallback() {
       if (latestBubbleIsStatus) return
       latestBubble = ''
       latestBubbleChanges = []
+      latestBubbleApplicationLaunches = []
       bubbleWindow?.hide()
     }
   }, (responseDuration + settings.bubbleDurationSeconds) * 1000)
@@ -620,7 +640,8 @@ function sendBubbleContent() {
     text: latestBubble,
     side: bubbleSide,
     status: latestBubbleIsStatus,
-    changes: latestBubbleChanges
+    changes: latestBubbleChanges,
+    applicationLaunches: latestBubbleApplicationLaunches
   } satisfies BubbleContent)
 }
 
@@ -633,7 +654,7 @@ function bubbleBounds() {
   const bubbleHeight = latestBubbleIsStatus
     ? 78
     : Math.min(
-      Math.max(154, estimateBubbleHeight(latestBubble) + latestBubbleChanges.length * 92),
+      Math.max(154, estimateBubbleHeight(latestBubble) + latestBubbleChanges.length * 92 + latestBubbleApplicationLaunches.length * 84),
       Math.max(154, Math.floor(area.height * 0.8))
     )
   const rightX = iconBounds.x + iconBounds.width + 10
@@ -768,6 +789,7 @@ function hideChat() {
   if (assistantActivity === 'thinking') {
     latestBubble = 'Thinking'
     latestBubbleChanges = []
+    latestBubbleApplicationLaunches = []
     latestBubbleIsStatus = true
   }
   showBubble()
@@ -795,6 +817,7 @@ function setAssistantActivity(activity: AssistantActivity) {
   if (activity === 'thinking') {
     latestBubble = 'Thinking'
     latestBubbleChanges = []
+    latestBubbleApplicationLaunches = []
     latestBubbleIsStatus = true
     if (bubbleHideTimer) clearTimeout(bubbleHideTimer)
     bubbleHideTimer = undefined
@@ -804,6 +827,7 @@ function setAssistantActivity(activity: AssistantActivity) {
   } else if (latestBubbleIsStatus) {
     latestBubble = ''
     latestBubbleChanges = []
+    latestBubbleApplicationLaunches = []
     latestBubbleIsStatus = false
     hideBubble()
   }
@@ -836,66 +860,27 @@ function toggleChat() {
   else openChat()
 }
 
-function safeWorkspacePath(relativePath: string) {
-  const root = path.resolve(settings.workspace)
-  const resolved = path.resolve(root, relativePath)
-  if (resolved === root || !resolved.startsWith(`${root}${path.sep}`)) {
-    throw new Error('File path must stay inside your configured workspace.')
-  }
-  // Resolve the nearest existing ancestor so new files cannot escape through a symlinked parent.
-  const realRoot = realpathSync(root)
-  let existingParent = resolved
-  while (!existsSync(existingParent)) {
-    const parent = path.dirname(existingParent)
-    if (parent === existingParent) throw new Error('Could not resolve the file path inside your workspace.')
-    existingParent = parent
-  }
-  const realParent = realpathSync(existingParent)
-  const relativeToRoot = path.relative(realRoot, realParent)
-  if (relativeToRoot === '..' || relativeToRoot.startsWith(`..${path.sep}`) || path.isAbsolute(relativeToRoot)) {
-    throw new Error('File path must stay inside your configured workspace, including through symbolic links.')
-  }
-  return resolved
-}
-
-function listWorkspaceFiles() {
-  const root = realpathSync(settings.workspace)
-  const files: string[] = []
-  const visit = (directory: string, depth: number) => {
-    if (depth > 5 || files.length >= 200) return
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (files.length >= 200) break
-      if (entry.isSymbolicLink() || entry.name === '.git' || entry.name === 'node_modules') continue
-      const target = path.join(directory, entry.name)
-      if (entry.isDirectory()) visit(target, depth + 1)
-      else if (entry.isFile() && !/^\.env(?:\.|$)/i.test(entry.name)) files.push(path.relative(root, target))
-    }
-  }
-  visit(root, 0)
-  return { files, truncated: files.length >= 200 }
-}
-
 async function stageWorkspaceChange(args: Record<string, unknown>) {
-  const relativePath = String(args.path ?? '')
+  const requestedPath = String(args.path ?? '')
   const operation = String(args.operation ?? '')
-  const target = safeWorkspacePath(relativePath)
+  const target = resolveAllowedFilePath(settings, requestedPath)
   if (!['create', 'edit', 'delete'].includes(operation)) throw new Error('File operation must be create, edit, or delete.')
   const exists = existsSync(target)
   if (operation === 'create' && exists) throw new Error('That file already exists; use edit instead.')
   if ((operation === 'edit' || operation === 'delete') && !exists) throw new Error('That file does not exist.')
   const before = exists ? readFileSync(target, 'utf8') : null
   const after = operation === 'delete' ? null : String(args.content ?? '')
-  const change: PendingChange = { id: randomUUID(), path: relativePath, operation: operation as PendingChange['operation'], before, after, createdAt: Date.now() }
+  const change: PendingChange = { id: randomUUID(), path: target, operation: operation as PendingChange['operation'], before, after, createdAt: Date.now() }
   if (settings.confirmFileChanges) {
     pendingChanges.set(change.id, change)
-    return { result: `Staged ${operation} for ${relativePath}. The user must approve it before the original file changes.`, change }
+    return { result: `Staged ${operation} for ${target}. The user must approve it before the original file changes.`, change }
   }
   if (operation === 'delete') unlinkSync(target)
   else {
     mkdirSync(path.dirname(target), { recursive: true })
     writeFileSync(target, after ?? '', 'utf8')
   }
-  return { result: `${operation} completed for ${relativePath}.` }
+  return { result: `${operation} completed for ${target}.` }
 }
 
 async function requestOllama(url: string, endpoint: string, body?: object, signal?: AbortSignal) {
@@ -1034,9 +1019,20 @@ function registerIpc() {
     }
     return runFeatureTool(name, args, {
       settings,
-      listWorkspaceFiles,
-      safeWorkspacePath,
-      stageFileChange: stageWorkspaceChange
+      browseAccessibleFiles: (requestedPath, offset) => browseAccessibleFiles(settings, requestedPath, offset),
+      searchAccessibleFiles: (query) => searchAccessibleFiles(settings, query),
+      readAccessibleFile: (requestedPath) => readAccessibleFile(settings, requestedPath),
+      stageFileChange: stageWorkspaceChange,
+      requestApplicationLaunch: (application) => {
+        const name = application.trim()
+        if (!name || name.length > 500 || /[\u0000-\u001f\u007f]/.test(name)) {
+          throw new Error('Application name or path is invalid.')
+        }
+        if (pendingApplicationLaunches.size >= 100) throw new Error('Too many applications are awaiting approval.')
+        const action: PendingApplicationLaunch = { id: randomUUID(), application: name }
+        pendingApplicationLaunches.set(action.id, action)
+        return action
+      }
     })
   })
   ipcMain.handle('api:resolve', async (event, id: string, approve: boolean) => {
@@ -1053,6 +1049,51 @@ function registerIpc() {
   })
   const isAssistantWindow = (sender: Electron.WebContents) =>
     sender === mainWindow?.webContents || sender === bubbleWindow?.webContents
+  const publishApplicationLaunchResolution = (id: string, approve: boolean, result: string) => {
+    pendingApplicationLaunches.delete(id)
+    latestBubbleApplicationLaunches = latestBubbleApplicationLaunches.filter((launch) => launch.id !== id)
+    sendBubbleContent()
+    mainWindow?.webContents.send('application:launch-resolved', {
+      id,
+      action: approve ? 'approved' : 'denied',
+      result
+    })
+  }
+  ipcMain.handle('application:resolve-launch', async (event, id: string, approve: boolean) => {
+    if (!isAssistantWindow(event.sender) || typeof approve !== 'boolean') {
+      throw new Error('Application launch approval request is invalid.')
+    }
+    const resolved = resolvedApplicationLaunches.get(id)
+    if (resolved) {
+      if (resolved.approve !== approve) throw new Error('This application launch has already been resolved.')
+      return resolved.result
+    }
+    const resolving = resolvingApplicationLaunches.get(id)
+    if (resolving) {
+      if (resolving.approve !== approve) throw new Error('This application launch is already being resolved.')
+      return resolving.promise
+    }
+    const action = pendingApplicationLaunches.get(id)
+    if (!action) throw new Error('This application launch is no longer awaiting approval.')
+    if (approve && (!settings.appControlEnabled || !settings.askBeforeUnlistedAppLaunch)) {
+      throw new Error('Unlisted application approval is disabled in Settings.')
+    }
+    if (!approve) {
+      const result = `Denied. ${action.application} was not opened.`
+      rememberApplicationLaunchResolution(id, false, result)
+      publishApplicationLaunchResolution(id, false, result)
+      return result
+    }
+    const promise = Promise.resolve().then(() =>
+      openApplication(action.application, settings.allowedApps, true)
+    ).then((result) => {
+      rememberApplicationLaunchResolution(id, true, result)
+      publishApplicationLaunchResolution(id, true, result)
+      return result
+    }).finally(() => resolvingApplicationLaunches.delete(id))
+    resolvingApplicationLaunches.set(id, { approve: true, promise })
+    return promise
+  })
   const resolveBubbleChange = (id: string, action: ChangeResolution['action']) => {
     latestBubbleChanges = latestBubbleChanges.filter((change) => change.id !== id)
     sendBubbleContent()
@@ -1062,7 +1103,7 @@ function registerIpc() {
     if (!isAssistantWindow(event.sender)) throw new Error('This file change request is invalid.')
     const change = pendingChanges.get(id)
     if (!change) throw new Error('This file change is no longer pending.')
-    const target = safeWorkspacePath(change.path)
+    const target = resolveAllowedFilePath(settings, change.path)
     const current = existsSync(target) ? readFileSync(target, 'utf8') : null
     if (current !== change.before) throw new Error('The original file changed since this proposal was created. Review the file and ask Nova to prepare a fresh change.')
     if (change.operation === 'delete') {
@@ -1089,7 +1130,7 @@ function registerIpc() {
   })
   ipcMain.handle('bubble:get', (event): BubbleContent => {
     if (event.sender !== bubbleWindow?.webContents) throw new Error('Bubble content is available only in the speech bubble.')
-    return { text: latestBubble, side: bubbleSide, status: latestBubbleIsStatus, changes: latestBubbleChanges }
+    return { text: latestBubble, side: bubbleSide, status: latestBubbleIsStatus, changes: latestBubbleChanges, applicationLaunches: latestBubbleApplicationLaunches }
   })
   ipcMain.handle('assistant:activity:get', (): AssistantActivity => assistantActivity)
   ipcMain.on('assistant:activity', (event, activity: AssistantActivity) => {
@@ -1112,12 +1153,18 @@ function registerIpc() {
   ipcMain.on('assistant:drag-end', (event) => {
     if (event.sender === floatingWindow?.webContents) floatingDragOrigin = undefined
   })
-  ipcMain.on('bubble:publish', (event, text: string, changes?: PendingChange[]) => {
+  ipcMain.on('bubble:publish', (event, text: string, changes?: PendingChange[], applicationLaunches?: PendingApplicationLaunch[]) => {
     if (event.sender !== mainWindow?.webContents || typeof text !== 'string') return
     latestBubble = text
     latestBubbleChanges = Array.isArray(changes)
       ? changes.flatMap((change) => {
         const pending = typeof change?.id === 'string' ? pendingChanges.get(change.id) : undefined
+        return pending ? [pending] : []
+      })
+      : []
+    latestBubbleApplicationLaunches = Array.isArray(applicationLaunches)
+      ? applicationLaunches.flatMap((launch) => {
+        const pending = typeof launch?.id === 'string' ? pendingApplicationLaunches.get(launch.id) : undefined
         return pending ? [pending] : []
       })
       : []

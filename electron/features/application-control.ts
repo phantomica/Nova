@@ -2,8 +2,20 @@ import { shell } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
+import type { AssistantSettings } from '../../src/shared'
 
 const launchedApplications = new Map<string, ChildProcess>()
+
+export function hasUriScheme(value: string) {
+  return /^[a-z][a-z\d+.-]*:/i.test(value) && !/^[a-z]:[\\/]/i.test(value)
+}
+
+function validateApplicationRequest(requested: string) {
+  const name = requested.trim()
+  if (!name) throw new Error('Application name or path is required.')
+  if (name.length > 500 || /[\u0000-\u001f\u007f]/.test(name)) throw new Error('Application name or path is invalid.')
+  return name
+}
 
 function spawnDetached(command: string, args: string[] = []) {
   const child = spawn(command, args, { detached: true, stdio: 'ignore', shell: false })
@@ -16,9 +28,7 @@ function spawnDetached(command: string, args: string[] = []) {
   })
 }
 
-export async function openApplication(requested: string, allowedApps: string[]) {
-  const name = requested.trim()
-  if (!name) throw new Error('Application name or path is required.')
+function matchingAllowedApplication(name: string, allowedApps: string[]) {
   const requestedIsPath = path.isAbsolute(name)
   const entries = allowedApps.map((raw) => {
     const separator = raw.indexOf('=')
@@ -26,18 +36,33 @@ export async function openApplication(requested: string, allowedApps: string[]) 
       ? { name: raw.slice(0, separator).trim(), target: raw.slice(separator + 1).trim() }
       : { name: path.basename(raw.trim()), target: raw.trim() }
   })
-  const allowedApp = entries.find(({ name: alias, target }) =>
+  return entries.find(({ name: alias, target }) =>
     alias.toLowerCase() === name.toLowerCase()
     || target.toLowerCase() === name.toLowerCase()
-    || (!requestedIsPath && !/^[a-z][a-z\d+.-]*:/i.test(target) && path.basename(target).toLowerCase() === path.basename(name).toLowerCase()))
-  if (!allowedApp) throw new Error(`${name} is not in your allowed apps list.`)
-  const appTarget = path.isAbsolute(allowedApp.target) ? path.resolve(allowedApp.target) : allowedApp.target
-  const appKey = allowedApp.name.toLowerCase()
-  if (/^(?:spotify:|steam:)/i.test(appTarget)) {
+    || (!requestedIsPath && !hasUriScheme(target) && path.basename(target).toLowerCase() === path.basename(name).toLowerCase()))
+}
+
+export function isApplicationAllowed(requested: string, allowedApps: string[]) {
+  const name = validateApplicationRequest(requested)
+  return Boolean(matchingAllowedApplication(name, allowedApps))
+}
+
+export async function openApplication(requested: string, allowedApps: string[], allowUnlisted = false) {
+  const name = validateApplicationRequest(requested)
+  const allowedApp = allowUnlisted ? undefined : matchingAllowedApplication(name, allowedApps)
+  if (!allowedApp && !allowUnlisted) throw new Error(`${name} is not in your allowed apps list.`)
+  if (!allowedApp && hasUriScheme(name)) {
+    throw new Error('Unlisted application approval is limited to executable names and paths, not application links.')
+  }
+  const appTarget = allowedApp
+    ? path.isAbsolute(allowedApp.target) ? path.resolve(allowedApp.target) : allowedApp.target
+    : name
+  const appKey = (allowedApp?.name ?? name).toLowerCase()
+  if (allowedApp && /^(?:spotify:|steam:)/i.test(appTarget)) {
     await shell.openExternal(appTarget)
     return `Opened ${allowedApp.name}.`
   }
-  if (/^[a-z][a-z\d+.-]*:/i.test(appTarget)) throw new Error('Only configured Spotify and Steam application links are supported.')
+  if (allowedApp && hasUriScheme(appTarget)) throw new Error('Only configured Spotify and Steam application links are supported.')
   const child = await spawnDetached(appTarget)
   launchedApplications.set(appKey, child)
   return `Opened ${appTarget}.`

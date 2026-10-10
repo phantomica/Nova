@@ -1,10 +1,24 @@
-import { closeApplication, openApplication, openExplorerLocation, openWindowsSettings } from './application-control'
-import { controlWindowsMedia } from './windows-media-control'
+import { closeApplication, hasUriScheme, isApplicationAllowed, openApplication, openExplorerLocation, openWindowsSettings } from './application-control'
 import type { FeatureToolHandler } from './tool-types'
 
-const openApp: FeatureToolHandler = (_args, context) => {
+const openApp: FeatureToolHandler = async (args, context) => {
   if (!context.settings.appControlEnabled) throw new Error('Desktop app control is disabled in Settings.')
-  return openApplication(String(_args.name ?? ''), context.settings.allowedApps).then((result) => ({ result }))
+  const requested = String(args.name ?? '').trim()
+  if (!requested) throw new Error('Application name or path is required.')
+  if (isApplicationAllowed(requested, context.settings.allowedApps)) {
+    return { result: await openApplication(requested, context.settings.allowedApps) }
+  }
+  if (!context.settings.askBeforeUnlistedAppLaunch) {
+    throw new Error(`${requested} is not in your allowed apps list. Enable approval for unlisted apps in Settings to request one-time permission.`)
+  }
+  if (hasUriScheme(requested)) {
+    throw new Error('One-time approval is limited to executable names and paths, not application links.')
+  }
+  const applicationLaunch = context.requestApplicationLaunch(requested)
+  return {
+    result: `Opening ${requested} is waiting for user approval. Do not claim that it has been launched.`,
+    applicationLaunch
+  }
 }
 
 const closeApp: FeatureToolHandler = (args, context) => {
@@ -22,15 +36,9 @@ const openExplorer: FeatureToolHandler = async (args, context) => {
   return { result: await openExplorerLocation(String(args.path ?? ''), context.settings.allowedFolders, context.settings.allowedFolderSubfolders) }
 }
 
-const mediaControl: FeatureToolHandler = async (args, context) => {
-  if (!context.settings.mediaControlEnabled) throw new Error('Windows media controls are disabled in Settings.')
-  return { result: await controlWindowsMedia(args) }
-}
-
 export const toolHandlers: Record<string, FeatureToolHandler> = {
   open_application: openApp,
   close_application: closeApp,
   open_windows_settings: openSettings,
-  open_explorer_location: openExplorer,
-  windows_media_control: mediaControl
+  open_explorer_location: openExplorer
 }

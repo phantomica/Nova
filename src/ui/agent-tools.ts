@@ -10,8 +10,6 @@ const featureTools = Object.values(import.meta.glob<AgentToolFeature>('./agent-t
   import: 'agentToolFeature'
 }))
 
-const tools = featureTools.flatMap(({ tools: definitions }) => definitions)
-
 function enabledTools(settings: AssistantSettings) {
   return featureTools.flatMap(({ tools: definitions, enabled }) => enabled(settings) ? definitions : [])
 }
@@ -35,4 +33,4 @@ function apiTools(integrations: ApiIntegration[]) {
   })))
 }
 
-export { tools, enabledTools, apiTools }
+export { enabledTools, apiTools }

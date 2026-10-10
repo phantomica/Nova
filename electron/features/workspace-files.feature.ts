@@ -1,26 +1,35 @@
-import { existsSync, readFileSync } from 'node:fs'
 import type { FeatureToolHandler } from './tool-types'
 
-const listFiles: FeatureToolHandler = (_args, context) => {
+const browseFiles: FeatureToolHandler = (args, context) => {
   if (!context.settings.fileOperationsEnabled) throw new Error('Workspace access is disabled in Settings.')
-  const listing = context.listWorkspaceFiles()
-  return { result: `${listing.files.join('\n') || '(workspace is empty)'}${listing.truncated ? '\n… limited to the first 200 files' : ''}` }
+  const requestedPath = String(args.path ?? '')
+  const offset = args.offset === undefined ? 0 : Number(args.offset)
+  const listing = context.browseAccessibleFiles(requestedPath, offset)
+  const entries = listing.entries.map((entry) =>
+    `${entry.type === 'folder' ? '[Folder]' : '[File]'} ${entry.path}${entry.type === 'folder' && !entry.accessible ? ' (subfolder access is disabled)' : ''}`)
+  const nextPage = listing.hasMore
+    ? `More entries are available; call browse_files again with path=${JSON.stringify(listing.directory)} and offset=${listing.nextOffset}.`
+    : 'End of this folder.'
+  return {
+    result: `Folder: ${listing.directory}\nShowing ${listing.entries.length} of ${listing.total} entries (maximum 25 per call).\n${entries.join('\n') || '(folder is empty)'}\n${nextPage}`
+  }
+}
+
+const searchFiles: FeatureToolHandler = (args, context) => {
+  if (!context.settings.fileOperationsEnabled) throw new Error('Workspace access is disabled in Settings.')
+  const search = context.searchAccessibleFiles(String(args.query ?? ''))
+  const lines = search.matches.map((match) => `${match.name}: ${match.path}`)
+  if (search.truncated) lines.push('Search stopped at its scan/result limit; narrow the filename query for more targeted results.')
+  if (search.errors.length) lines.push(`Some approved locations could not be searched:\n${search.errors.join('\n')}`)
+  return {
+    result: `Filename matches (${search.matches.length} shown; searched ${search.scannedEntries} directory entries):\n${lines.join('\n') || '(no filename matches found)'}`
+  }
 }
 
 const readFile: FeatureToolHandler = (args, context) => {
   if (!context.settings.fileOperationsEnabled) throw new Error('Workspace access is disabled in Settings.')
-  const relativePath = String(args.path ?? '')
-  const target = context.safeWorkspacePath(relativePath)
-  if (!existsSync(target)) throw new Error('That file does not exist.')
-  const data = readFileSync(target)
-  if (data.length > 128 * 1024) throw new Error('File is larger than the 128 KB read limit.')
-  if (data.includes(0)) throw new Error('Binary files cannot be read as text.')
-  try {
-    const content = new TextDecoder('utf-8', { fatal: true }).decode(data)
-    return { result: `Contents of ${relativePath}:\n${content}` }
-  } catch {
-    throw new Error('File is not valid UTF-8 text.')
-  }
+  const file = context.readAccessibleFile(String(args.path ?? ''))
+  return { result: `Contents of ${file.path}:\n${file.content}` }
 }
 
 const stageChange: FeatureToolHandler = (args, context) => {
@@ -29,7 +38,8 @@ const stageChange: FeatureToolHandler = (args, context) => {
 }
 
 export const toolHandlers: Record<string, FeatureToolHandler> = {
-  list_workspace_files: listFiles,
-  read_workspace_file: readFile,
+  browse_files: browseFiles,
+  search_files: searchFiles,
+  read_file: readFile,
   stage_file_change: stageChange
 }

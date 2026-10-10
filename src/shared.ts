@@ -27,6 +27,7 @@ export type AssistantSettings = {
   diagnosticsDisksEnabled: boolean
   fileOperationsEnabled: boolean
   appControlEnabled: boolean
+  askBeforeUnlistedAppLaunch: boolean
   mediaControlEnabled: boolean
   apiAccessEnabled: boolean
   allowedApps: string[]
@@ -78,6 +79,24 @@ export type PendingApiAction = {
   arguments: Record<string, unknown>
 }
 
+export type PendingApplicationLaunch = {
+  id: string
+  application: string
+}
+
+export type ApplicationLaunchResolution = {
+  id: string
+  action: 'approved' | 'denied'
+  result: string
+}
+
+export type ToolOutcome = {
+  result: string
+  change?: PendingChange
+  apiAction?: PendingApiAction
+  applicationLaunch?: PendingApplicationLaunch
+}
+
 export type ActionTrace = {
   name: string
   arguments: Record<string, unknown>
@@ -112,6 +131,7 @@ export type BubbleContent = {
   side: 'left' | 'right'
   status?: boolean
   changes?: PendingChange[]
+  applicationLaunches?: PendingApplicationLaunch[]
 }
 
 export type ChangeResolution = {
@@ -135,8 +155,10 @@ export type DesktopApi = {
   onSettingsUpdated: (listener: (settings: AssistantSettings) => void) => () => void
   listModels: (url: string) => Promise<string[]>
   chat: (requestId: string, url: string, model: string, messages: OllamaMessage[], tools: object[]) => Promise<OllamaMessage>
-  runTool: (name: string, args: Record<string, unknown>) => Promise<{ result: string; change?: PendingChange; apiAction?: PendingApiAction }>
+  runTool: (name: string, args: Record<string, unknown>) => Promise<ToolOutcome>
   resolveApiAction: (id: string, approve: boolean) => Promise<string>
+  resolveApplicationLaunch: (id: string, approve: boolean) => Promise<string>
+  onApplicationLaunchResolved: (listener: (resolution: ApplicationLaunchResolution) => void) => () => void
   setApiCredential: (integrationId: string, token: string) => Promise<void>
   clearApiCredential: (integrationId: string) => Promise<void>
   getApiCredentialStatuses: (integrationIds: string[]) => Promise<Record<string, boolean>>
@@ -154,7 +176,7 @@ export type DesktopApi = {
   endFloatingDrag: () => void
   openAssistant: () => void
   hideAssistant: () => void
-  publishBubble: (text: string, changes?: PendingChange[]) => void
+  publishBubble: (text: string, changes?: PendingChange[], applicationLaunches?: PendingApplicationLaunch[]) => void
   getBubbleContent: () => Promise<BubbleContent>
   onBubbleContent: (listener: (content: BubbleContent) => void) => () => void
   transcribeSpeech: (audio: Float32Array, language: string) => Promise<string>

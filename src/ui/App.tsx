@@ -4,12 +4,12 @@ import {
   LoaderCircle, Mic, MicOff, Minus, Square, Settings2, ShieldCheck, Sparkles,
   Volume2, VolumeX, X
 } from 'lucide-react'
-import type { ActionTrace, AssistantActivity, AssistantSettings, OllamaMessage, PendingApiAction, PendingChange } from '../shared'
+import type { ActionTrace, AssistantActivity, AssistantSettings, OllamaMessage, PendingApiAction, PendingApplicationLaunch, PendingChange } from '../shared'
 import { apiTools, enabledTools } from './agent-tools'
 import { ChatText, decodeForWhisper, plainTextForSpeech } from './formatting'
 import { ActionTraceCard, ChangeCard, FloatingButton, SettingsPanel, SpeechBubble, assistantSystemPrompt } from './components'
 
-type ChatMessage = { id: string; role: 'user' | 'assistant'; content: string; change?: PendingChange; trace?: ActionTrace; apiAction?: PendingApiAction }
+type ChatMessage = { id: string; role: 'user' | 'assistant'; content: string; change?: PendingChange; trace?: ActionTrace; apiAction?: PendingApiAction; applicationLaunch?: PendingApplicationLaunch }
 
 function ChatApp() {
   const [settings, setSettings] = useState<AssistantSettings | null>(null)
@@ -28,6 +28,7 @@ function ChatApp() {
   const [busyChange, setBusyChange] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
   const pendingBubbleChangesRef = useRef<PendingChange[]>([])
+  const pendingBubbleApplicationLaunchesRef = useRef<PendingApplicationLaunch[]>([])
   // Generation IDs invalidate callbacks from recordings stopped or replaced while async decoding is in flight.
   const activeRef = useRef(false)
   const discardClipRef = useRef(false)
@@ -80,6 +81,17 @@ function ChatApp() {
       ? { ...message, content: action === 'approved'
         ? `Confirmed. ${message.change.operation} completed for ${message.change.path}.`
         : `Proposal denied. No changes were made to ${message.change.path}.`, change: undefined }
+      : message))
+  }), [])
+
+  useEffect(() => window.desktop.onApplicationLaunchResolved(({ id, action, result }) => {
+    pendingBubbleApplicationLaunchesRef.current = pendingBubbleApplicationLaunchesRef.current.filter((launch) => launch.id !== id)
+    setMessages((old) => old.map((message) => message.applicationLaunch?.id === id
+      ? {
+        ...message,
+        applicationLaunch: undefined,
+        trace: { ...message.trace!, status: action === 'approved' ? 'succeeded' : 'denied', result }
+      }
       : message))
   }), [])
 
@@ -166,11 +178,19 @@ function ChatApp() {
             const outcome = await window.desktop.runTool(call.function.name, actionArguments)
             history.push({ role: 'tool', content: outcome.result })
             setMessages((old) => old.map((message) => message.id === traceId
-              ? { ...message, trace: { ...message.trace!, status: outcome.apiAction ? 'pending' : 'succeeded', result: outcome.result }, apiAction: outcome.apiAction }
+              ? {
+                ...message,
+                trace: { ...message.trace!, status: outcome.apiAction || outcome.applicationLaunch ? 'pending' : 'succeeded', result: outcome.result },
+                apiAction: outcome.apiAction,
+                applicationLaunch: outcome.applicationLaunch
+              }
               : message))
             if (outcome.change) {
               pendingBubbleChangesRef.current = [...pendingBubbleChangesRef.current, outcome.change]
               setMessages((old) => [...old, { id: crypto.randomUUID(), role: 'assistant', content: 'I’ve prepared this file change for your review. The original is still untouched.', change: outcome.change }])
+            }
+            if (outcome.applicationLaunch) {
+              pendingBubbleApplicationLaunchesRef.current = [...pendingBubbleApplicationLaunchesRef.current, outcome.applicationLaunch]
             }
             if (cancelledChatRequestsRef.current.has(requestId)) return
           } catch (reason) {
@@ -191,7 +211,7 @@ function ChatApp() {
       messageHistory.current = history
       const content = response.content || 'Done.'
       setMessages((old) => [...old, { id: crypto.randomUUID(), role: 'assistant', content }])
-      window.desktop.publishBubble(content, pendingBubbleChangesRef.current)
+      window.desktop.publishBubble(content, pendingBubbleChangesRef.current, pendingBubbleApplicationLaunchesRef.current)
       say(content)
     } catch (reason) {
       if (cancelledChatRequestsRef.current.has(requestId)) {
@@ -218,6 +238,18 @@ function ChatApp() {
       ? {
         ...message,
         apiAction: undefined,
+        trace: { ...message.trace!, status: approve ? 'succeeded' : 'denied', result }
+      }
+      : message))
+    return result
+  }
+
+  const resolveApplicationLaunch = async (id: string, approve: boolean) => {
+    const result = await window.desktop.resolveApplicationLaunch(id, approve)
+    setMessages((old) => old.map((message) => message.applicationLaunch?.id === id
+      ? {
+        ...message,
+        applicationLaunch: undefined,
         trace: { ...message.trace!, status: approve ? 'succeeded' : 'denied', result }
       }
       : message))
@@ -624,7 +656,13 @@ function ChatApp() {
         {message.role === 'assistant' && <div className="avatar"><Sparkles size={13} /></div>}
         <div className="message-stack">
           {message.content && <div className="message-bubble"><ChatText>{message.content}</ChatText></div>}
-          {message.trace && <ActionTraceCard trace={message.trace} apiAction={message.apiAction} onResolve={resolveApiAction} />}
+          {message.trace && <ActionTraceCard
+            trace={message.trace}
+            apiAction={message.apiAction}
+            applicationLaunch={message.applicationLaunch}
+            onResolve={resolveApiAction}
+            onResolveApplicationLaunch={resolveApplicationLaunch}
+          />}
           {message.change && <ChangeCard change={message.change} onApprove={(change, content) => void approve(change, content)} onUpdate={updateProposal} onDiscard={(change) => void discard(change)} busy={busyChange === message.change.id} />}
         </div>
       </div>)}

@@ -57,6 +57,9 @@ html:has(.floating-root), html:has(.bubble-root), body:has(.floating-root), body
 .bubble-change-actions { display: flex; justify-content: flex-end; align-items: center; gap: 4px; padding: 5px; border-top: 1px solid var(--border); }
 .bubble-change-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 3px; min-height: 24px; padding: 0 6px; border-radius: 5px; font-size: 8px; font-weight: 600; cursor: pointer; }
 .bubble-change-actions button:disabled { opacity: .55; cursor: default; }
+.bubble-launch-description { display: flex; align-items: center; gap: 5px; padding: 7px 8px 2px; color: #d9e2d2; font-size: 9px; }
+.bubble-launch-description svg { flex: none; color: var(--green); }
+.bubble-launch > code { display: block; max-height: 42px; overflow: auto; margin: 2px 8px 5px; color: #d8ded2; font: 9px/1.4 Consolas, 'Courier New', monospace; overflow-wrap: anywhere; }
 .bubble-change-error { margin: 0; color: #f0a79e; font-size: 9px; overflow-wrap: anywhere; }
 .topbar { height: 62px; flex: 0 0 62px; display: flex; align-items: center; padding: 0 17px; border-bottom: 1px solid var(--border); -webkit-app-region: drag; }
 .brand { display: flex; align-items: center; gap: 9px; min-width: 111px; }

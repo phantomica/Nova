@@ -3,7 +3,7 @@ import type { AssistantSettings } from '../../shared'
 export const desktopControlTools = [
   {
     type: 'function',
-    function: { name: 'open_application', description: 'Open an application from the user-configured allowlist.', parameters: { type: 'object', properties: { name: { type: 'string', description: 'Executable name, e.g. notepad.exe' } }, required: ['name'] } }
+    function: { name: 'open_application', description: 'Open an application from the user-configured allowlist. If one-time approval for unlisted programs is enabled, request to open an unlisted executable by its exact name or path; the user must approve before launch.', parameters: { type: 'object', properties: { name: { type: 'string', description: 'Configured application alias/executable, or exact executable name/path for one-time approval' } }, required: ['name'] } }
   },
   {
     type: 'function',
