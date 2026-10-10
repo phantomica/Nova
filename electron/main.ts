@@ -38,6 +38,11 @@ const defaults: AssistantSettings = {
   bubbleDurationMode: 'after-speech',
   confirmFileChanges: true,
   webSearchEnabled: true,
+  systemDiagnosticsEnabled: false,
+  diagnosticsPerformanceEnabled: true,
+  diagnosticsProcessesEnabled: true,
+  diagnosticsNetworkEnabled: true,
+  diagnosticsDisksEnabled: true,
   fileOperationsEnabled: true,
   appControlEnabled: true,
   mediaControlEnabled: true,
@@ -173,6 +178,11 @@ function loadSettings() {
         restoreChatWindowPosition: typeof loaded.restoreChatWindowPosition === 'boolean' ? loaded.restoreChatWindowPosition : defaults.restoreChatWindowPosition,
         chatSizeBehavior: ['on-open', 'on-restart', 'never'].includes(loaded.chatSizeBehavior ?? '') ? loaded.chatSizeBehavior! : defaults.chatSizeBehavior,
         mediaControlEnabled: typeof loaded.mediaControlEnabled === 'boolean' ? loaded.mediaControlEnabled : defaults.mediaControlEnabled,
+        systemDiagnosticsEnabled: typeof loaded.systemDiagnosticsEnabled === 'boolean' ? loaded.systemDiagnosticsEnabled : defaults.systemDiagnosticsEnabled,
+        diagnosticsPerformanceEnabled: typeof loaded.diagnosticsPerformanceEnabled === 'boolean' ? loaded.diagnosticsPerformanceEnabled : defaults.diagnosticsPerformanceEnabled,
+        diagnosticsProcessesEnabled: typeof loaded.diagnosticsProcessesEnabled === 'boolean' ? loaded.diagnosticsProcessesEnabled : defaults.diagnosticsProcessesEnabled,
+        diagnosticsNetworkEnabled: typeof loaded.diagnosticsNetworkEnabled === 'boolean' ? loaded.diagnosticsNetworkEnabled : defaults.diagnosticsNetworkEnabled,
+        diagnosticsDisksEnabled: typeof loaded.diagnosticsDisksEnabled === 'boolean' ? loaded.diagnosticsDisksEnabled : defaults.diagnosticsDisksEnabled,
         allowedFolders: Array.isArray(loaded.allowedFolders) ? loaded.allowedFolders.filter((folder): folder is string => typeof folder === 'string') : defaults.allowedFolders,
         allowedFolderSubfolders: Array.isArray(loaded.allowedFolderSubfolders)
           ? loaded.allowedFolderSubfolders.filter((folder): folder is string => typeof folder === 'string')
@@ -225,6 +235,11 @@ function persistSettings(next: AssistantSettings) {
   if (!['on-open', 'on-restart', 'never'].includes(next.chatSizeBehavior)) throw new Error('Chat window size behavior is invalid.')
   if (typeof next.apiAccessEnabled !== 'boolean') throw new Error('API access setting is invalid.')
   if (typeof next.mediaControlEnabled !== 'boolean') throw new Error('Windows media control setting is invalid.')
+  if (typeof next.systemDiagnosticsEnabled !== 'boolean' || typeof next.diagnosticsPerformanceEnabled !== 'boolean'
+    || typeof next.diagnosticsProcessesEnabled !== 'boolean' || typeof next.diagnosticsNetworkEnabled !== 'boolean'
+    || typeof next.diagnosticsDisksEnabled !== 'boolean') {
+    throw new Error('System diagnostics settings are invalid.')
+  }
   if (!Array.isArray(next.allowedApps) || next.allowedApps.length > 100 || next.allowedApps.some((entry) => typeof entry !== 'string' || !entry.trim() || entry.length > 500)) {
     throw new Error('Allowed applications must be a list of up to 100 non-empty names or paths.')
   }

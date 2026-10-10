@@ -20,6 +20,11 @@ export type AssistantSettings = {
   bubbleDurationMode: 'fixed' | 'after-speech'
   confirmFileChanges: boolean
   webSearchEnabled: boolean
+  systemDiagnosticsEnabled: boolean
+  diagnosticsPerformanceEnabled: boolean
+  diagnosticsProcessesEnabled: boolean
+  diagnosticsNetworkEnabled: boolean
+  diagnosticsDisksEnabled: boolean
   fileOperationsEnabled: boolean
   appControlEnabled: boolean
   mediaControlEnabled: boolean
@@ -29,6 +34,18 @@ export type AssistantSettings = {
   allowedFolderSubfolders: string[]
   apiIntegrations: ApiIntegration[]
   programDefaultsVersion?: number
+}
+
+export type SystemDiagnosticCategory = 'performance' | 'processes' | 'network' | 'disks'
+
+export function isSystemDiagnosticEnabled(settings: AssistantSettings, category: SystemDiagnosticCategory) {
+  if (!settings.systemDiagnosticsEnabled) return false
+  switch (category) {
+    case 'performance': return settings.diagnosticsPerformanceEnabled
+    case 'processes': return settings.diagnosticsProcessesEnabled
+    case 'network': return settings.diagnosticsNetworkEnabled
+    case 'disks': return settings.diagnosticsDisksEnabled
+  }
 }
 
 export type ApiOperation = {

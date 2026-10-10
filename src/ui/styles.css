@@ -225,6 +225,14 @@ html:has(.floating-root), html:has(.bubble-root), body:has(.floating-root), body
 .setting-toggle-row > div { display: flex; flex-direction: column; gap: 3px; }
 .setting-toggle-row b { font-size: 10px; font-weight: 600; color: #dfe4da; }
 .setting-toggle-row small { max-width: 260px; color: #858d81; font-size: 9px; line-height: 1.4; }
+.setting-toggle-row.disabled { opacity: .48; }
+.toggle:disabled { cursor: not-allowed; }
+.diagnostics-options { margin-top: 3px; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; background: rgba(12, 15, 12, .24); }
+.diagnostics-options summary { padding: 8px 0; color: #cdd5c7; font-size: 9px; font-weight: 600; cursor: pointer; }
+.diagnostics-options[open] summary { border-bottom: 1px solid var(--border); }
+.diagnostics-options .setting-hint { margin: 7px 0 1px; }
+.diagnostics-options .setting-toggle-row { padding: 6px 0; }
+.diagnostics-options .setting-toggle-row small { max-width: 285px; }
 .api-integrations-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 0 3px; border-top: 1px solid var(--border); }
 .api-integrations-heading > div { display: flex; flex-direction: column; gap: 3px; }
 .api-integrations-heading b { color: #dfe4da; font-size: 10px; }
