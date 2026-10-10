@@ -1,4 +1,6 @@
 export type AssistantSettings = {
+  assistantName: string
+  appName: string
   themePreset: 'nova' | 'midnight' | 'dusk'
   accentColor: string
   ollamaUrl: string

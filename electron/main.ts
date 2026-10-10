@@ -17,6 +17,8 @@ const floatingPositionPath = path.join(app.getPath('userData'), 'floating-positi
 const chatPositionPath = path.join(app.getPath('userData'), 'chat-position.json')
 const chatSizePath = path.join(app.getPath('userData'), 'chat-size.json')
 const defaults: AssistantSettings = {
+  assistantName: 'Nova',
+  appName: 'Nova',
   themePreset: 'nova',
   accentColor: '#a5ed88',
   ollamaUrl: 'http://localhost:11434',
@@ -100,6 +102,15 @@ const pendingApiActions = new Map<string, PendingApiAction>()
 let apiCredentials: Record<string, string> = {}
 const activeChatRequests = new Map<string, { senderId: number; controller: AbortController }>()
 
+function updateTrayBranding() {
+  if (!tray) return
+  tray.setToolTip(`${settings.appName} · Desktop AI`)
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: `Open ${settings.appName}`, click: openChat },
+    { label: 'Quit', click: () => app.quit() }
+  ]))
+}
+
 env.cacheDir = path.join(app.getPath('userData'), 'speech-model-cache')
 env.allowRemoteModels = true
 env.allowLocalModels = false
@@ -150,6 +161,12 @@ function loadSettings() {
       settings = {
         ...defaults,
         ...loaded,
+        appName: typeof loaded.appName === 'string' && loaded.appName.trim().length > 0 && loaded.appName.trim().length <= 40 && !/[\u0000-\u001f\u007f]/.test(loaded.appName)
+          ? loaded.appName.trim()
+          : defaults.appName,
+        assistantName: typeof loaded.assistantName === 'string' && loaded.assistantName.trim().length > 0 && loaded.assistantName.trim().length <= 40 && !/[\u0000-\u001f\u007f]/.test(loaded.assistantName)
+          ? loaded.assistantName.trim()
+          : defaults.assistantName,
         themePreset: ['nova', 'midnight', 'dusk'].includes(loaded.themePreset ?? '') ? loaded.themePreset! : defaults.themePreset,
         accentColor: typeof loaded.accentColor === 'string' && /^#[\da-f]{6}$/i.test(loaded.accentColor) ? loaded.accentColor : defaults.accentColor,
         rememberFloatingPosition,
@@ -178,6 +195,12 @@ function loadSettings() {
 }
 
 function persistSettings(next: AssistantSettings) {
+  if (typeof next.appName !== 'string' || !next.appName.trim() || next.appName.trim().length > 40 || /[\u0000-\u001f\u007f]/.test(next.appName)) {
+    throw new Error('App name must contain 1 to 40 characters and no line breaks or control characters.')
+  }
+  if (typeof next.assistantName !== 'string' || !next.assistantName.trim() || next.assistantName.trim().length > 40 || /[\u0000-\u001f\u007f]/.test(next.assistantName)) {
+    throw new Error('Assistant name must contain 1 to 40 characters and no line breaks or control characters.')
+  }
   if (!['nova', 'midnight', 'dusk'].includes(next.themePreset)) throw new Error('App theme preset is invalid.')
   if (typeof next.accentColor !== 'string' || !/^#[\da-f]{6}$/i.test(next.accentColor)) throw new Error('Accent color must be a six-digit hex color.')
   if (!next.ollamaUrl.startsWith('http://') && !next.ollamaUrl.startsWith('https://')) {
@@ -226,7 +249,9 @@ function persistSettings(next: AssistantSettings) {
   if (!next.rememberFloatingPosition && existsSync(floatingPositionPath)) unlinkSync(floatingPositionPath)
   if (!next.restoreChatWindowPosition && existsSync(chatPositionPath)) unlinkSync(chatPositionPath)
   if (next.chatSizeBehavior !== 'never' && existsSync(chatSizePath)) unlinkSync(chatSizePath)
-  settings = { ...next, ollamaUrl: next.ollamaUrl.replace(/\/+$/, ''), programDefaultsVersion: defaults.programDefaultsVersion }
+  settings = { ...next, appName: next.appName.trim(), assistantName: next.assistantName.trim(), ollamaUrl: next.ollamaUrl.replace(/\/+$/, ''), programDefaultsVersion: defaults.programDefaultsVersion }
+  mainWindow?.setTitle(settings.appName)
+  updateTrayBranding()
   mkdirSync(path.dirname(settingsPath), { recursive: true })
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8')
   if (latestBubble && !latestBubbleIsStatus) {
@@ -410,7 +435,7 @@ function createWindow() {
     minWidth: 370,
     minHeight: 500,
     show: false,
-    title: 'Nova',
+    title: settings.appName,
     backgroundColor: '#111311',
     frame: false,
     titleBarStyle: 'hidden',
@@ -1115,11 +1140,7 @@ app.whenReady().then(() => {
   })
   const icon = nativeImage.createFromDataURL(`data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="10" fill="#a6f28a"/><path d="M10 17c0-4 2-7 6-7s6 3 6 7v4h-3v-4c0-2-1-4-3-4s-3 2-3 4v4h-3z" fill="#151714"/></svg>')}`)
   tray = new Tray(icon)
-  tray.setToolTip('Nova · Desktop AI')
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Open Nova', click: openChat },
-    { label: 'Quit', click: () => app.quit() }
-  ]))
+  updateTrayBranding()
   tray.on('click', toggleChat)
   app.on('activate', openChat)
 })

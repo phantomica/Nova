@@ -613,7 +613,7 @@ function ChatApp() {
   const pendingCount = messages.filter((message) => message.change).length
   return <div className="app-shell">
     <header className="topbar">
-      <div className="brand"><div className="brand-icon"><Sparkles size={16} /></div><div className="brand-copy"><b>nova</b><span>LOCAL AI INTERFACE</span></div></div>
+      <div className="brand"><div className="brand-icon"><Sparkles size={16} /></div><div className="brand-copy"><b>{settings.appName}</b><span>LOCAL AI INTERFACE</span></div></div>
       <div className="topbar-status"><span className={`status-dot ${modelReady === false ? 'offline' : ''}`} />{modelReady === false ? 'Model offline' : settings.model}</div>
       <div className="window-actions"><button className="icon-button" onClick={() => setSettingsOpen(true)} title="Settings" aria-label="Settings"><Settings2 size={17} /></button><button className="icon-button window-hide" onClick={() => window.desktop.hideAssistant()} title="Hide Nova" aria-label="Hide Nova"><Minus size={17} /></button></div>
     </header>
@@ -639,7 +639,7 @@ function ChatApp() {
       <div className="composer">
         <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => {
           if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(input) }
-        }} placeholder={listening ? 'Listening…' : 'Message Nova…'} rows={1} aria-label="Message Nova" />
+        }} placeholder={listening ? 'Listening…' : `Message ${settings.assistantName}…`} rows={1} aria-label={`Message ${settings.assistantName}`} />
         <div className="composer-actions">
           <div className="composer-tools">
             <button className={`icon-button wake-toggle ${settings.wakeWordEnabled ? 'is-enabled' : ''}`} onClick={() => void toggleWakeWord()} title={settings.wakeWordEnabled ? `Turn off wake phrase “${settings.wakeWord}”` : 'Turn on wake phrase listening'} aria-label={settings.wakeWordEnabled ? 'Turn off wake phrase listening' : 'Turn on wake phrase listening'} aria-pressed={settings.wakeWordEnabled}>
