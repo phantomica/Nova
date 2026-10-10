@@ -94,13 +94,35 @@ export function configuredLocation(entry: string) {
   return { alias, target }
 }
 
-export async function openExplorerLocation(requested: string, allowedFolders: string[]) {
+function isPathWithin(root: string, candidate: string) {
+  const relative = path.relative(root, candidate)
+  return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`))
+}
+
+export async function openExplorerLocation(requested: string, allowedFolders: string[], allowedFolderSubfolders: string[] = []) {
   const name = requested.trim()
-  const allowed = allowedFolders.map(configuredLocation).find(({ alias, target }) =>
-    (alias && alias.toLowerCase() === name.toLowerCase())
-    || path.resolve(target).toLowerCase() === path.resolve(name).toLowerCase())
-  if (!name || !allowed) throw new Error('That folder is not in the configured Explorer locations list.')
-  const target = realpathSync(allowed.target)
+  if (!name) throw new Error('A configured File Explorer location is required.')
+  const requestedAbsolutePath = path.resolve(name)
+  const allowed = allowedFolders.map(configuredLocation).map(({ alias, target }) => {
+    const root = path.resolve(target)
+    const includeSubfolders = allowedFolderSubfolders.some((folder) => path.resolve(folder).toLowerCase() === root.toLowerCase())
+    if ((alias && alias.toLowerCase() === name.toLowerCase()) || root.toLowerCase() === requestedAbsolutePath.toLowerCase()) {
+      return { root, candidate: root }
+    }
+    if (!includeSubfolders) return undefined
+    let candidate: string
+    if (alias && name.length > alias.length && name.slice(0, alias.length).toLowerCase() === alias.toLowerCase()
+      && ['\\', '/'].includes(name[alias.length])) {
+      candidate = path.resolve(root, name.slice(alias.length + 1))
+    } else {
+      candidate = requestedAbsolutePath
+    }
+    return candidate !== root && isPathWithin(root, candidate) ? { root, candidate } : undefined
+  }).find((location) => location !== undefined)
+  if (!allowed) throw new Error('That folder is not in the configured File Explorer locations list or an enabled subfolder.')
+  const realRoot = realpathSync(allowed.root)
+  const target = realpathSync(allowed.candidate)
+  if (!isPathWithin(realRoot, target)) throw new Error('The requested subfolder resolves outside its approved File Explorer location.')
   if (!statSync(target).isDirectory()) throw new Error('The configured Explorer location is not a folder.')
   await spawnDetached('explorer.exe', [target])
   return `Opened ${target} in File Explorer.`

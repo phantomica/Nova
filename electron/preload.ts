@@ -4,6 +4,12 @@ import type { AssistantActivity, AssistantSettings, BubbleContent, ChangeResolut
 const desktop: DesktopApi = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings: AssistantSettings) => ipcRenderer.invoke('settings:save', settings),
+  pickFolder: () => ipcRenderer.invoke('folder:pick'),
+  onSettingsUpdated: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, settings: AssistantSettings) => listener(settings)
+    ipcRenderer.on('settings:updated', handler)
+    return () => ipcRenderer.removeListener('settings:updated', handler)
+  },
   listModels: (url: string) => ipcRenderer.invoke('ollama:models', url),
   chat: (requestId, url, model, messages, tools) =>
     ipcRenderer.invoke('ollama:chat', requestId, url, model, messages, tools),

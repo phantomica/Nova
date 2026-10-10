@@ -1,9 +1,14 @@
 export type AssistantSettings = {
+  themePreset: 'nova' | 'midnight' | 'dusk'
+  accentColor: string
   ollamaUrl: string
   model: string
   workspace: string
   wakeWord: string
   wakeWordEnabled: boolean
+  rememberFloatingPosition: boolean
+  restoreChatWindowPosition: boolean
+  chatSizeBehavior: 'on-open' | 'on-restart' | 'never'
   interruptSpeechOnVoiceInput: boolean
   speakReplies: boolean
   speechVoice: string
@@ -19,6 +24,7 @@ export type AssistantSettings = {
   apiAccessEnabled: boolean
   allowedApps: string[]
   allowedFolders: string[]
+  allowedFolderSubfolders: string[]
   apiIntegrations: ApiIntegration[]
   programDefaultsVersion?: number
 }
@@ -106,6 +112,8 @@ export type AssistantActivity = 'idle' | 'listening' | 'wake-heard' | 'recognizi
 export type DesktopApi = {
   getSettings: () => Promise<AssistantSettings>
   saveSettings: (settings: AssistantSettings) => Promise<AssistantSettings>
+  pickFolder: () => Promise<string | undefined>
+  onSettingsUpdated: (listener: (settings: AssistantSettings) => void) => () => void
   listModels: (url: string) => Promise<string[]>
   chat: (requestId: string, url: string, model: string, messages: OllamaMessage[], tools: object[]) => Promise<OllamaMessage>
   runTool: (name: string, args: Record<string, unknown>) => Promise<{ result: string; change?: PendingChange; apiAction?: PendingApiAction }>

@@ -19,7 +19,7 @@ const openSettings: FeatureToolHandler = async (args, context) => {
 
 const openExplorer: FeatureToolHandler = async (args, context) => {
   if (!context.settings.appControlEnabled) throw new Error('Desktop app control is disabled in Settings.')
-  return { result: await openExplorerLocation(String(args.path ?? ''), context.settings.allowedFolders) }
+  return { result: await openExplorerLocation(String(args.path ?? ''), context.settings.allowedFolders, context.settings.allowedFolderSubfolders) }
 }
 
 const mediaControl: FeatureToolHandler = async (args, context) => {

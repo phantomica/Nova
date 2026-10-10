@@ -15,7 +15,7 @@ export const desktopControlTools = [
   },
   {
     type: 'function',
-    function: { name: 'open_explorer_location', description: 'Open a configured folder in Windows File Explorer. Only folders listed in Settings are available.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'A configured folder path or alias' } }, required: ['path'] } }
+    function: { name: 'open_explorer_location', description: 'Open a configured folder in Windows File Explorer. Use a folder alias or path; subfolders are available only when enabled for that location in Settings.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'A configured folder path or alias, optionally followed by a subfolder path when enabled' } }, required: ['path'] } }
   }
 ]
 

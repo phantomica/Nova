@@ -665,6 +665,29 @@ function ChatApp() {
 }
 
 export default function App() {
+  useEffect(() => {
+    let mounted = true
+    const applyTheme = (settings: AssistantSettings) => {
+      if (!mounted) return
+      const root = document.documentElement
+      root.dataset.themePreset = settings.themePreset
+      root.style.setProperty('--accent-color', settings.accentColor)
+      const color = settings.accentColor.slice(1)
+      const channels = [0, 2, 4].map((offset) => Number.parseInt(color.slice(offset, offset + 2), 16) / 255)
+      const luminance = channels
+        .map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4)
+        .reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0)
+      root.style.setProperty('--accent-contrast', luminance > 0.45 ? '#151714' : '#f6f7f2')
+    }
+    const unsubscribe = window.desktop.onSettingsUpdated(applyTheme)
+    void window.desktop.getSettings().then(applyTheme).catch((reason: unknown) => {
+      console.error('Could not apply Nova appearance settings:', reason)
+    })
+    return () => {
+      mounted = false
+      unsubscribe()
+    }
+  }, [])
   const view = new URLSearchParams(window.location.search).get('view')
   if (view === 'floating') return <FloatingButton />
   if (view === 'bubble') return <SpeechBubble />

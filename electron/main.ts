@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, safeStorage, Tray, Menu, nativeImage, screen, session } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, Tray, Menu, nativeImage, screen, session } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -14,12 +14,19 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const settingsPath = path.join(app.getPath('userData'), 'settings.json')
 const apiCredentialsPath = path.join(app.getPath('userData'), 'api-credentials.json')
 const floatingPositionPath = path.join(app.getPath('userData'), 'floating-position.json')
+const chatPositionPath = path.join(app.getPath('userData'), 'chat-position.json')
+const chatSizePath = path.join(app.getPath('userData'), 'chat-size.json')
 const defaults: AssistantSettings = {
+  themePreset: 'nova',
+  accentColor: '#a5ed88',
   ollamaUrl: 'http://localhost:11434',
   model: 'gemma4',
   workspace: app.getPath('documents'),
   wakeWord: 'hey nova',
   wakeWordEnabled: false,
+  rememberFloatingPosition: true,
+  restoreChatWindowPosition: false,
+  chatSizeBehavior: 'on-restart',
   interruptSpeechOnVoiceInput: true,
   speakReplies: true,
   speechVoice: '',
@@ -42,6 +49,7 @@ const defaults: AssistantSettings = {
     'VS Code=Code.exe'
   ],
   allowedFolders: [app.getPath('documents'), app.getPath('downloads'), app.getPath('desktop')],
+  allowedFolderSubfolders: [],
   apiIntegrations: [],
   programDefaultsVersion: 1
 }
@@ -71,6 +79,7 @@ let settings = defaults
 let mainWindow: BrowserWindow | undefined
 let floatingWindow: BrowserWindow | undefined
 let bubbleWindow: BrowserWindow | undefined
+let folderPickerOpen = false
 let tray: Tray | undefined
 let latestBubble = ''
 let latestBubbleChanges: PendingChange[] = []
@@ -81,6 +90,7 @@ let pendingAssistantActivity: AssistantActivity = 'idle'
 let wakeIndicatorUntil = 0
 let isQuitting = false
 let positionSaveTimer: NodeJS.Timeout | undefined
+let chatPositionSaveTimer: NodeJS.Timeout | undefined
 let bubbleHideTimer: NodeJS.Timeout | undefined
 let thinkingBubbleTimer: NodeJS.Timeout | undefined
 let floatingDragOrigin: { pointerX: number; pointerY: number; windowX: number; windowY: number } | undefined
@@ -129,16 +139,27 @@ function whisperLanguage(language: string) {
 function loadSettings() {
   try {
     if (existsSync(settingsPath)) {
-      const loaded = JSON.parse(readFileSync(settingsPath, 'utf8')) as Partial<AssistantSettings>
+      const loaded = JSON.parse(readFileSync(settingsPath, 'utf8')) as Partial<AssistantSettings> & { rememberWindowPosition?: unknown }
       const loadedApps = Array.isArray(loaded.allowedApps) ? loaded.allowedApps.filter((item): item is string => typeof item === 'string') : undefined
+      const rememberFloatingPosition = typeof loaded.rememberFloatingPosition === 'boolean'
+        ? loaded.rememberFloatingPosition
+        : typeof loaded.rememberWindowPosition === 'boolean' ? loaded.rememberWindowPosition : defaults.rememberFloatingPosition
       const allowedApps = (loaded.programDefaultsVersion ?? 0) < defaults.programDefaultsVersion!
         ? [...new Set([...(loadedApps ?? []), ...defaults.allowedApps])]
         : loadedApps ?? defaults.allowedApps
       settings = {
         ...defaults,
         ...loaded,
+        themePreset: ['nova', 'midnight', 'dusk'].includes(loaded.themePreset ?? '') ? loaded.themePreset! : defaults.themePreset,
+        accentColor: typeof loaded.accentColor === 'string' && /^#[\da-f]{6}$/i.test(loaded.accentColor) ? loaded.accentColor : defaults.accentColor,
+        rememberFloatingPosition,
+        restoreChatWindowPosition: typeof loaded.restoreChatWindowPosition === 'boolean' ? loaded.restoreChatWindowPosition : defaults.restoreChatWindowPosition,
+        chatSizeBehavior: ['on-open', 'on-restart', 'never'].includes(loaded.chatSizeBehavior ?? '') ? loaded.chatSizeBehavior! : defaults.chatSizeBehavior,
         mediaControlEnabled: typeof loaded.mediaControlEnabled === 'boolean' ? loaded.mediaControlEnabled : defaults.mediaControlEnabled,
         allowedFolders: Array.isArray(loaded.allowedFolders) ? loaded.allowedFolders.filter((folder): folder is string => typeof folder === 'string') : defaults.allowedFolders,
+        allowedFolderSubfolders: Array.isArray(loaded.allowedFolderSubfolders)
+          ? loaded.allowedFolderSubfolders.filter((folder): folder is string => typeof folder === 'string')
+          : defaults.allowedFolderSubfolders,
         allowedApps,
         programDefaultsVersion: defaults.programDefaultsVersion,
         apiAccessEnabled: typeof loaded.apiAccessEnabled === 'boolean' ? loaded.apiAccessEnabled : defaults.apiAccessEnabled,
@@ -157,6 +178,8 @@ function loadSettings() {
 }
 
 function persistSettings(next: AssistantSettings) {
+  if (!['nova', 'midnight', 'dusk'].includes(next.themePreset)) throw new Error('App theme preset is invalid.')
+  if (typeof next.accentColor !== 'string' || !/^#[\da-f]{6}$/i.test(next.accentColor)) throw new Error('Accent color must be a six-digit hex color.')
   if (!next.ollamaUrl.startsWith('http://') && !next.ollamaUrl.startsWith('https://')) {
     throw new Error('Ollama URL must start with http:// or https://.')
   }
@@ -173,6 +196,10 @@ function persistSettings(next: AssistantSettings) {
   if (typeof next.interruptSpeechOnVoiceInput !== 'boolean') {
     throw new Error('Voice-input speech interruption setting is invalid.')
   }
+  if (typeof next.rememberFloatingPosition !== 'boolean' || typeof next.restoreChatWindowPosition !== 'boolean') {
+    throw new Error('Window position settings are invalid.')
+  }
+  if (!['on-open', 'on-restart', 'never'].includes(next.chatSizeBehavior)) throw new Error('Chat window size behavior is invalid.')
   if (typeof next.apiAccessEnabled !== 'boolean') throw new Error('API access setting is invalid.')
   if (typeof next.mediaControlEnabled !== 'boolean') throw new Error('Windows media control setting is invalid.')
   if (!Array.isArray(next.allowedApps) || next.allowedApps.length > 100 || next.allowedApps.some((entry) => typeof entry !== 'string' || !entry.trim() || entry.length > 500)) {
@@ -185,8 +212,20 @@ function persistSettings(next: AssistantSettings) {
     if (alias && !/^[\p{L}\p{N} _-]{1,60}$/u.test(alias)) throw new Error('Explorer location aliases may contain letters, numbers, spaces, _ and - only.')
     if (!path.isAbsolute(target)) throw new Error(`Explorer location must use an absolute path: ${target}`)
   }
+  if (!Array.isArray(next.allowedFolderSubfolders) || next.allowedFolderSubfolders.length > 50) {
+    throw new Error('Configure subfolder access for no more than 50 Explorer locations.')
+  }
+  const configuredFolderPaths = new Set(next.allowedFolders.map((entry) => path.resolve(configuredLocation(entry).target).toLowerCase()))
+  for (const folder of next.allowedFolderSubfolders) {
+    if (typeof folder !== 'string' || !path.isAbsolute(folder) || !configuredFolderPaths.has(path.resolve(folder).toLowerCase())) {
+      throw new Error('Subfolder access must refer to an approved File Explorer location.')
+    }
+  }
   validateApiIntegrations(next.apiIntegrations)
   mkdirSync(next.workspace, { recursive: true })
+  if (!next.rememberFloatingPosition && existsSync(floatingPositionPath)) unlinkSync(floatingPositionPath)
+  if (!next.restoreChatWindowPosition && existsSync(chatPositionPath)) unlinkSync(chatPositionPath)
+  if (next.chatSizeBehavior !== 'never' && existsSync(chatSizePath)) unlinkSync(chatSizePath)
   settings = { ...next, ollamaUrl: next.ollamaUrl.replace(/\/+$/, ''), programDefaultsVersion: defaults.programDefaultsVersion }
   mkdirSync(path.dirname(settingsPath), { recursive: true })
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8')
@@ -346,9 +385,28 @@ async function executeApiAction(action: PendingApiAction) {
 function createWindow() {
   const preloadPath = path.resolve(here, '../preload/index.js')
   if (!existsSync(preloadPath)) throw new Error(`Nova preload bundle was not found: ${preloadPath}`)
+  const savedSize = settings.chatSizeBehavior === 'never' ? readChatWindowSize() : undefined
+  const requestedWidth = savedSize?.width ?? 430
+  const requestedHeight = savedSize?.height ?? 690
+  const savedPosition = settings.restoreChatWindowPosition ? readWindowPosition(chatPositionPath) : undefined
+  const display = savedPosition
+    ? screen.getDisplayMatching({ ...savedPosition, width: requestedWidth, height: requestedHeight })
+    : screen.getPrimaryDisplay()
+  const width = Math.min(requestedWidth, display.workArea.width)
+  const height = Math.min(requestedHeight, display.workArea.height)
+  const windowPosition = savedPosition
+    ? clampToWorkArea(
+      savedPosition.x,
+      savedPosition.y,
+      width,
+      height,
+      display.workArea
+    )
+    : undefined
   mainWindow = new BrowserWindow({
-    width: 430,
-    height: 690,
+    width,
+    height,
+    ...windowPosition,
     minWidth: 370,
     minHeight: 500,
     show: false,
@@ -366,8 +424,10 @@ function createWindow() {
   })
   monitorWindow(floatingWindow, 'floating icon')
   monitorWindow(mainWindow, 'chat')
+  mainWindow.on('move', saveChatWindowBounds)
+  mainWindow.on('resize', saveChatWindowBounds)
   mainWindow.on('blur', () => {
-    if (mainWindow?.isVisible()) hideChat()
+    if (!folderPickerOpen && mainWindow?.isVisible()) hideChat()
   })
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
@@ -392,24 +452,77 @@ function clampToWorkArea(x: number, y: number, width: number, height: number, ar
 }
 
 function savedFloatingPosition() {
-  try {
-    const value = JSON.parse(readFileSync(floatingPositionPath, 'utf8')) as { x?: number; y?: number }
-    if (Number.isFinite(value.x) && Number.isFinite(value.y)) return { x: value.x as number, y: value.y as number }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error('Could not read floating icon position:', error)
-  }
+  const savedPosition = settings.rememberFloatingPosition ? readWindowPosition(floatingPositionPath) : undefined
+  if (savedPosition) return savedPosition
   const area = screen.getPrimaryDisplay().workArea
   return { x: area.x + area.width - 92, y: area.y + area.height - 108 }
 }
 
+function readWindowPosition(positionPath: string) {
+  try {
+    const value = JSON.parse(readFileSync(positionPath, 'utf8')) as { x?: number; y?: number }
+    if (Number.isFinite(value.x) && Number.isFinite(value.y)) return { x: value.x as number, y: value.y as number }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error(`Could not read saved window position (${positionPath}):`, error)
+  }
+  return undefined
+}
+
+function writeWindowPosition(window: BrowserWindow, positionPath: string) {
+  const { x, y } = window.getBounds()
+  mkdirSync(path.dirname(positionPath), { recursive: true })
+  writeFileSync(positionPath, JSON.stringify({ x, y }), 'utf8')
+}
+
+function readChatWindowSize() {
+  try {
+    const value = JSON.parse(readFileSync(chatSizePath, 'utf8')) as { width?: number; height?: number }
+    if (Number.isFinite(value.width) && Number.isFinite(value.height)
+      && value.width! >= 370 && value.width! <= 8192
+      && value.height! >= 500 && value.height! <= 8192) {
+      return { width: value.width!, height: value.height! }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error('Could not read Nova chat window size:', error)
+  }
+  return undefined
+}
+
+function saveChatWindowBounds() {
+  if (!settings.restoreChatWindowPosition && settings.chatSizeBehavior !== 'never') {
+    if (chatPositionSaveTimer) clearTimeout(chatPositionSaveTimer)
+    chatPositionSaveTimer = undefined
+    return
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (chatPositionSaveTimer) clearTimeout(chatPositionSaveTimer)
+  chatPositionSaveTimer = setTimeout(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    try {
+      if (settings.restoreChatWindowPosition) writeWindowPosition(mainWindow, chatPositionPath)
+      if (settings.chatSizeBehavior === 'never') {
+        const { width, height } = mainWindow.getBounds()
+        mkdirSync(path.dirname(chatSizePath), { recursive: true })
+        writeFileSync(chatSizePath, JSON.stringify({ width, height }), 'utf8')
+      }
+    } catch (error) {
+      console.error('Could not save Nova chat window bounds:', error)
+    }
+  }, 200)
+}
+
 function saveFloatingPosition() {
+  if (!settings.rememberFloatingPosition) {
+    if (positionSaveTimer) clearTimeout(positionSaveTimer)
+    positionSaveTimer = undefined
+    return
+  }
   if (!floatingWindow || floatingWindow.isDestroyed()) return
   if (positionSaveTimer) clearTimeout(positionSaveTimer)
   positionSaveTimer = setTimeout(() => {
-    if (!floatingWindow || floatingWindow.isDestroyed()) return
+    if (!settings.rememberFloatingPosition || !floatingWindow || floatingWindow.isDestroyed()) return
     try {
-      mkdirSync(path.dirname(floatingPositionPath), { recursive: true })
-      writeFileSync(floatingPositionPath, JSON.stringify({ x: floatingWindow.getBounds().x, y: floatingWindow.getBounds().y }), 'utf8')
+      writeWindowPosition(floatingWindow, floatingPositionPath)
     } catch (error) {
       console.error('Could not save floating icon position:', error)
     }
@@ -577,7 +690,7 @@ function createFloatingWindow() {
   })
   floatingWindow.setAlwaysOnTop(true, 'floating')
   floatingWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-  floatingWindow.on('moved', saveFloatingPosition)
+  floatingWindow.on('move', saveFloatingPosition)
   floatingWindow.on('closed', () => { floatingWindow = undefined })
   const url = rendererUrl('floating')
   if (url) void floatingWindow.loadURL(url)
@@ -592,11 +705,16 @@ function openChat() {
     latestBubbleIsStatus = false
   }
   if (!mainWindow) createWindow()
-  if (floatingWindow && mainWindow) {
+  if (settings.chatSizeBehavior === 'on-open' && mainWindow) mainWindow.setSize(430, 690)
+  if (floatingWindow && mainWindow && (!settings.restoreChatWindowPosition || !readWindowPosition(chatPositionPath))) {
     const iconBounds = floatingWindow.getBounds()
     const display = screen.getDisplayMatching(iconBounds)
     const area = display.workArea
-    const position = clampToWorkArea(iconBounds.x - 430 + iconBounds.width, iconBounds.y + iconBounds.height - 690, 430, 690, area)
+    const [currentWidth, currentHeight] = mainWindow.getSize()
+    const width = Math.min(currentWidth, area.width)
+    const height = Math.min(currentHeight, area.height)
+    if (width !== currentWidth || height !== currentHeight) mainWindow.setSize(width, height)
+    const position = clampToWorkArea(iconBounds.x - width + iconBounds.width, iconBounds.y + iconBounds.height - height, width, height, area)
     mainWindow.setPosition(position.x, position.y)
   }
   floatingWindow?.hide()
@@ -756,7 +874,9 @@ async function requestOllama(url: string, endpoint: string, body?: object, signa
 
 function registerIpc() {
   ipcMain.handle('settings:get', (event) => {
-    if (event.sender !== mainWindow?.webContents) throw new Error('Settings are available only in the Nova chat window.')
+    if (![mainWindow, floatingWindow, bubbleWindow].some((window) => window?.webContents === event.sender)) {
+      throw new Error('Settings are available only in Nova windows.')
+    }
     return settings
   })
   ipcMain.handle('settings:save', (event, next: AssistantSettings) => {
@@ -765,7 +885,25 @@ function registerIpc() {
     const validIds = new Set(saved.apiIntegrations.map((integration) => integration.id))
     const nextCredentials = Object.fromEntries(Object.entries(apiCredentials).filter(([id]) => validIds.has(id)))
     if (Object.keys(nextCredentials).length !== Object.keys(apiCredentials).length) persistApiCredentials(nextCredentials)
+    for (const window of [mainWindow, floatingWindow, bubbleWindow]) {
+      if (window && !window.isDestroyed()) window.webContents.send('settings:updated', saved)
+    }
     return saved
+  })
+  ipcMain.handle('folder:pick', async (event) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('Folders can be selected only in the Nova chat window.')
+    const parent = mainWindow
+    if (!parent || parent.isDestroyed()) throw new Error('The Nova chat window is unavailable.')
+    folderPickerOpen = true
+    try {
+      const result = await dialog.showOpenDialog(parent, {
+        title: 'Choose an approved File Explorer location',
+        properties: ['openDirectory', 'createDirectory']
+      })
+      return result.canceled ? undefined : result.filePaths[0]
+    } finally {
+      folderPickerOpen = false
+    }
   })
   ipcMain.handle('api:credential:statuses', (event, integrationIds: string[]) => {
     if (event.sender !== mainWindow?.webContents || !Array.isArray(integrationIds)) throw new Error('API credential status request is invalid.')
@@ -989,5 +1127,22 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {})
 app.on('before-quit', () => {
   isQuitting = true
+  if (positionSaveTimer) clearTimeout(positionSaveTimer)
+  if (chatPositionSaveTimer) clearTimeout(chatPositionSaveTimer)
+  if (settings.rememberFloatingPosition && floatingWindow && !floatingWindow.isDestroyed()) {
+    try { writeWindowPosition(floatingWindow, floatingPositionPath) }
+    catch (error) { console.error('Could not save floating icon position:', error) }
+  }
+  if (settings.restoreChatWindowPosition && mainWindow && !mainWindow.isDestroyed()) {
+    try { writeWindowPosition(mainWindow, chatPositionPath) }
+    catch (error) { console.error('Could not save Nova chat window position:', error) }
+  }
+  if (settings.chatSizeBehavior === 'never' && mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      const { width, height } = mainWindow.getBounds()
+      mkdirSync(path.dirname(chatSizePath), { recursive: true })
+      writeFileSync(chatSizePath, JSON.stringify({ width, height }), 'utf8')
+    } catch (error) { console.error('Could not save Nova chat window size:', error) }
+  }
   stopLaunchedApplications()
 })
