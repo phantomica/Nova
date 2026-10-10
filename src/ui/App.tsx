@@ -613,13 +613,13 @@ function ChatApp() {
   const pendingCount = messages.filter((message) => message.change).length
   return <div className="app-shell">
     <header className="topbar">
-      <div className="brand"><div className="brand-icon"><Sparkles size={16} /></div><div className="brand-copy"><b>nova</b><span>YOUR LOCAL AI</span></div></div>
+      <div className="brand"><div className="brand-icon"><Sparkles size={16} /></div><div className="brand-copy"><b>nova</b><span>LOCAL AI INTERFACE</span></div></div>
       <div className="topbar-status"><span className={`status-dot ${modelReady === false ? 'offline' : ''}`} />{modelReady === false ? 'Model offline' : settings.model}</div>
       <div className="window-actions"><button className="icon-button" onClick={() => setSettingsOpen(true)} title="Settings" aria-label="Settings"><Settings2 size={17} /></button><button className="icon-button window-hide" onClick={() => window.desktop.hideAssistant()} title="Hide Nova" aria-label="Hide Nova"><Minus size={17} /></button></div>
     </header>
     <main className="conversation" aria-label="Chat messages">
       {modelReady === false && <button className="connection-notice" onClick={() => setSettingsOpen(true)}><CircleHelp size={16} /><span><b>Can’t find your model.</b> Check Ollama and model settings.</span><ChevronRight size={16} /></button>}
-      <div className="date-divider"><span>YOUR PRIVATE SPACE</span></div>
+      <div className="date-divider"><span>CHAT</span></div>
       {messages.map((message) => <div className={`message-row ${message.role}`} key={message.id}>
         {message.role === 'assistant' && <div className="avatar"><Sparkles size={13} /></div>}
         <div className="message-stack">
