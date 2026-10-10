@@ -16,10 +16,6 @@ export const desktopControlTools = [
   {
     type: 'function',
     function: { name: 'open_explorer_location', description: 'Open a configured folder in Windows File Explorer. Only folders listed in Settings are available.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'A configured folder path or alias' } }, required: ['path'] } }
-  },
-  {
-    type: 'function',
-    function: { name: 'windows_media_control', description: 'Control Windows media playback or system volume using media keys.', parameters: { type: 'object', properties: { action: { type: 'string', enum: ['play-pause', 'next', 'previous', 'volume-up', 'volume-down', 'mute'] } }, required: ['action'] } }
   }
 ]
 

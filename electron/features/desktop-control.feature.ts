@@ -24,7 +24,7 @@ const openExplorer: FeatureToolHandler = async (args, context) => {
 
 const mediaControl: FeatureToolHandler = async (args, context) => {
   if (!context.settings.mediaControlEnabled) throw new Error('Windows media controls are disabled in Settings.')
-  return { result: await controlWindowsMedia(String(args.action ?? '')) }
+  return { result: await controlWindowsMedia(args) }
 }
 
 export const toolHandlers: Record<string, FeatureToolHandler> = {
