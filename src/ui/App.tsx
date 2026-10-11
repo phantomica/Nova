@@ -4,12 +4,12 @@ import {
   LoaderCircle, Mic, MicOff, Minus, Square, Settings2, ShieldCheck, Sparkles,
   Volume2, VolumeX, X
 } from 'lucide-react'
-import type { ActionTrace, AssistantActivity, AssistantSettings, OllamaMessage, PendingApiAction, PendingApplicationLaunch, PendingChange } from '../shared'
+import type { ActionTrace, AssistantActivity, AssistantSettings, LocationAccessResolution, OllamaMessage, PendingApiAction, PendingApplicationLaunch, PendingChange, PendingLocationAccess } from '../shared'
 import { apiTools, enabledTools } from './agent-tools'
 import { ChatText, decodeForWhisper, plainTextForSpeech } from './formatting'
 import { ActionTraceCard, ChangeCard, FloatingButton, SettingsPanel, SpeechBubble, assistantSystemPrompt } from './components'
 
-type ChatMessage = { id: string; role: 'user' | 'assistant'; content: string; change?: PendingChange; trace?: ActionTrace; apiAction?: PendingApiAction; applicationLaunch?: PendingApplicationLaunch }
+type ChatMessage = { id: string; role: 'user' | 'assistant'; content: string; change?: PendingChange; trace?: ActionTrace; apiAction?: PendingApiAction; applicationLaunch?: PendingApplicationLaunch; locationAccess?: PendingLocationAccess }
 
 function ChatApp() {
   const [settings, setSettings] = useState<AssistantSettings | null>(null)
@@ -29,6 +29,9 @@ function ChatApp() {
   const bottomRef = useRef<HTMLDivElement>(null)
   const pendingBubbleChangesRef = useRef<PendingChange[]>([])
   const pendingBubbleApplicationLaunchesRef = useRef<PendingApplicationLaunch[]>([])
+  const pendingLocationAccessWaitersRef = useRef(new Map<string, { taskId: string; resolve: (resolution: LocationAccessResolution) => void }>())
+  const resolvedLocationAccessRef = useRef(new Map<string, LocationAccessResolution>())
+  const cancelledLocationAccessRef = useRef(new Set<string>())
   // Generation IDs invalidate callbacks from recordings stopped or replaced while async decoding is in flight.
   const activeRef = useRef(false)
   const discardClipRef = useRef(false)
@@ -95,6 +98,23 @@ function ChatApp() {
       : message))
   }), [])
 
+  useEffect(() => window.desktop.onLocationAccessResolved(({ id, taskId, result, approved }) => {
+    const waiter = pendingLocationAccessWaitersRef.current.get(id)
+    if (waiter) {
+      pendingLocationAccessWaitersRef.current.delete(id)
+      waiter.resolve({ id, taskId, result, approved })
+    } else if (!cancelledLocationAccessRef.current.delete(id)) {
+      resolvedLocationAccessRef.current.set(id, { id, taskId, approved, result })
+    }
+    setMessages((old) => old.map((message) => message.locationAccess?.id === id
+      ? {
+        ...message,
+        locationAccess: undefined,
+        trace: { ...message.trace!, status: approved ? 'succeeded' : 'denied', result }
+      }
+      : message))
+  }), [])
+
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [messages, busy])
 
   useEffect(() => {
@@ -133,6 +153,13 @@ function ChatApp() {
       cancelledChatRequestsRef.current.add(requestId)
       activeChatRequestRef.current = null
       window.desktop.cancelChat(requestId)
+      for (const [id, waiter] of pendingLocationAccessWaitersRef.current) {
+        if (waiter.taskId === requestId) {
+          void window.desktop.resolveLocationAccess(id, false).catch((reason) => {
+            setError(reason instanceof Error ? reason.message : 'Could not cancel the pending location access request.')
+          })
+        }
+      }
       setBusy(false)
     }
     window.speechSynthesis?.cancel()
@@ -175,16 +202,86 @@ function ChatApp() {
             trace: { name: call.function.name, arguments: actionArguments, status: 'running', result: '' }
           }])
           try {
-            const outcome = await window.desktop.runTool(call.function.name, actionArguments)
-            history.push({ role: 'tool', content: outcome.result })
+            let outcome = await window.desktop.runTool(call.function.name, actionArguments, requestId)
+            if (cancelledChatRequestsRef.current.has(requestId)) {
+              if (outcome.locationAccess) {
+                const alreadyResolved = resolvedLocationAccessRef.current.delete(outcome.locationAccess.id)
+                if (!alreadyResolved) {
+                  cancelledLocationAccessRef.current.add(outcome.locationAccess.id)
+                  try {
+                    await window.desktop.resolveLocationAccess(outcome.locationAccess.id, false)
+                  } catch (reason) {
+                    cancelledLocationAccessRef.current.delete(outcome.locationAccess.id)
+                    setError(reason instanceof Error ? reason.message : 'Could not cancel the pending location access request.')
+                  }
+                }
+                setMessages((old) => old.map((message) => message.id === traceId
+                  ? { ...message, trace: { ...message.trace!, status: 'denied', result: 'Task interrupted; temporary access is no longer active.' } }
+                  : message))
+              }
+              return
+            }
             setMessages((old) => old.map((message) => message.id === traceId
               ? {
                 ...message,
-                trace: { ...message.trace!, status: outcome.apiAction || outcome.applicationLaunch ? 'pending' : 'succeeded', result: outcome.result },
+                trace: { ...message.trace!, status: outcome.apiAction || outcome.applicationLaunch || outcome.locationAccess ? 'pending' : 'succeeded', result: outcome.result },
                 apiAction: outcome.apiAction,
-                applicationLaunch: outcome.applicationLaunch
+                applicationLaunch: outcome.applicationLaunch,
+                locationAccess: outcome.locationAccess
               }
               : message))
+            let accessDenied = false
+            while (outcome.locationAccess) {
+              const accessRequest = outcome.locationAccess
+              setMessages((old) => old.map((message) => message.id === traceId
+                ? {
+                  ...message,
+                  locationAccess: accessRequest,
+                  trace: { ...message.trace!, status: 'pending', result: outcome.result }
+                }
+                : message))
+              let accessResolution = resolvedLocationAccessRef.current.get(accessRequest.id)
+              if (accessResolution) {
+                resolvedLocationAccessRef.current.delete(accessRequest.id)
+              } else {
+                accessResolution = await new Promise<LocationAccessResolution>((resolve) => {
+                  pendingLocationAccessWaitersRef.current.set(accessRequest.id, { taskId: requestId, resolve })
+                })
+              }
+              if (cancelledChatRequestsRef.current.has(requestId)) return
+              if (!accessResolution.approved || call.function.name === 'request_location_access') {
+                accessDenied = !accessResolution.approved
+                outcome = { result: accessResolution.result }
+                break
+              }
+              setMessages((old) => old.map((message) => message.id === traceId
+                ? {
+                  ...message,
+                  locationAccess: undefined,
+                  trace: { ...message.trace!, status: 'running', result: 'Access approved. Continuing the requested operation.' }
+                }
+                : message))
+              outcome = await window.desktop.runTool(call.function.name, actionArguments, requestId)
+              if (cancelledChatRequestsRef.current.has(requestId)) return
+            }
+            setMessages((old) => old.map((message) => message.id === traceId
+              ? {
+                ...message,
+                locationAccess: outcome.locationAccess,
+                apiAction: outcome.apiAction,
+                applicationLaunch: outcome.applicationLaunch,
+                trace: {
+                  ...message.trace!,
+                  status: accessDenied
+                    ? 'denied'
+                    : outcome.apiAction || outcome.applicationLaunch || outcome.locationAccess
+                      ? 'pending'
+                      : 'succeeded',
+                  result: outcome.result
+                }
+              }
+              : message))
+            history.push({ role: 'tool', content: outcome.result })
             if (outcome.change) {
               pendingBubbleChangesRef.current = [...pendingBubbleChangesRef.current, outcome.change]
               setMessages((old) => [...old, { id: crypto.randomUUID(), role: 'assistant', content: 'I’ve prepared this file change for your review. The original is still untouched.', change: outcome.change }])
@@ -222,6 +319,7 @@ function ChatApp() {
       setError(detail)
       setMessages((old) => [...old, { id: crypto.randomUUID(), role: 'assistant', content: `I couldn’t complete that: ${detail}` }])
     } finally {
+      window.desktop.finishAgentTask(requestId)
       if (cancelledChatRequestsRef.current.has(requestId)) messageHistory.current = previousHistory
       cancelledChatRequestsRef.current.delete(requestId)
       if (activeChatRequestRef.current === requestId) {
@@ -254,6 +352,10 @@ function ChatApp() {
       }
       : message))
     return result
+  }
+
+  const resolveLocationAccess = async (id: string, approve: boolean) => {
+    return window.desktop.resolveLocationAccess(id, approve)
   }
 
   // Decoding/transcription may outlive a recording session; check its generation before acting on results.
@@ -660,8 +762,10 @@ function ChatApp() {
             trace={message.trace}
             apiAction={message.apiAction}
             applicationLaunch={message.applicationLaunch}
+            locationAccess={message.locationAccess}
             onResolve={resolveApiAction}
             onResolveApplicationLaunch={resolveApplicationLaunch}
+            onResolveLocationAccess={resolveLocationAccess}
           />}
           {message.change && <ChangeCard change={message.change} onApprove={(change, content) => void approve(change, content)} onUpdate={updateProposal} onDiscard={(change) => void discard(change)} busy={busyChange === message.change.id} />}
         </div>

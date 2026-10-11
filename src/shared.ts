@@ -6,6 +6,7 @@ export type AssistantSettings = {
   ollamaUrl: string
   model: string
   workspace: string
+  workspaceSubfolders: boolean
   wakeWord: string
   wakeWordEnabled: boolean
   rememberFloatingPosition: boolean
@@ -26,6 +27,7 @@ export type AssistantSettings = {
   diagnosticsNetworkEnabled: boolean
   diagnosticsDisksEnabled: boolean
   fileOperationsEnabled: boolean
+  requestLocationAccessEnabled: boolean
   appControlEnabled: boolean
   askBeforeUnlistedAppLaunch: boolean
   mediaControlEnabled: boolean
@@ -84,6 +86,19 @@ export type PendingApplicationLaunch = {
   application: string
 }
 
+export type PendingLocationAccess = {
+  id: string
+  path: string
+  reason: string
+}
+
+export type LocationAccessResolution = {
+  id: string
+  taskId: string
+  approved: boolean
+  result: string
+}
+
 export type ApplicationLaunchResolution = {
   id: string
   action: 'approved' | 'denied'
@@ -95,6 +110,7 @@ export type ToolOutcome = {
   change?: PendingChange
   apiAction?: PendingApiAction
   applicationLaunch?: PendingApplicationLaunch
+  locationAccess?: PendingLocationAccess
 }
 
 export type ActionTrace = {
@@ -107,6 +123,7 @@ export type ActionTrace = {
 export type PendingChange = {
   id: string
   path: string
+  temporaryAccessRoot?: string
   operation: 'create' | 'edit' | 'delete'
   before: string | null
   after: string | null
@@ -132,6 +149,7 @@ export type BubbleContent = {
   status?: boolean
   changes?: PendingChange[]
   applicationLaunches?: PendingApplicationLaunch[]
+  locationAccessRequests?: PendingLocationAccess[]
 }
 
 export type ChangeResolution = {
@@ -155,9 +173,12 @@ export type DesktopApi = {
   onSettingsUpdated: (listener: (settings: AssistantSettings) => void) => () => void
   listModels: (url: string) => Promise<string[]>
   chat: (requestId: string, url: string, model: string, messages: OllamaMessage[], tools: object[]) => Promise<OllamaMessage>
-  runTool: (name: string, args: Record<string, unknown>) => Promise<ToolOutcome>
+  runTool: (name: string, args: Record<string, unknown>, taskId: string) => Promise<ToolOutcome>
   resolveApiAction: (id: string, approve: boolean) => Promise<string>
   resolveApplicationLaunch: (id: string, approve: boolean) => Promise<string>
+  resolveLocationAccess: (id: string, approve: boolean) => Promise<string>
+  onLocationAccessResolved: (listener: (resolution: LocationAccessResolution) => void) => () => void
+  finishAgentTask: (taskId: string) => void
   onApplicationLaunchResolved: (listener: (resolution: ApplicationLaunchResolution) => void) => () => void
   setApiCredential: (integrationId: string, token: string) => Promise<void>
   clearApiCredential: (integrationId: string) => Promise<void>

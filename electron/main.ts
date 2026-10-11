@@ -1,13 +1,13 @@
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, Tray, Menu, nativeImage, screen, session } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { env, pipeline } from '@huggingface/transformers'
 import type { ProgressInfo } from '@huggingface/transformers'
-import type { ApiIntegration, AssistantActivity, AssistantSettings, BubbleContent, ChangeResolution, OllamaMessage, PendingApiAction, PendingApplicationLaunch, PendingChange, SpeechProgress } from '../src/shared'
+import type { ApiIntegration, AssistantActivity, AssistantSettings, BubbleContent, ChangeResolution, LocationAccessResolution, OllamaMessage, PendingApiAction, PendingApplicationLaunch, PendingChange, PendingLocationAccess, SpeechProgress } from '../src/shared'
 import { configuredLocation, openApplication, stopLaunchedApplications } from './features/application-control'
-import { browseAccessibleFiles, readAccessibleFile, resolveAllowedFilePath, searchAccessibleFiles } from './features/file-access'
+import { browseAccessibleFiles, isAccessibleFilePath, readAccessibleFile, resolveAllowedFilePath, resolveTemporaryFolderAccess, searchAccessibleFiles, temporaryAccessRootForPath } from './features/file-access'
 import { runFeatureTool } from './features/tool-registry'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -25,6 +25,8 @@ const defaults: AssistantSettings = {
   ollamaUrl: 'http://localhost:11434',
   model: 'gemma4',
   workspace: app.getPath('documents'),
+  workspaceSubfolders: true,
+  requestLocationAccessEnabled: false,
   wakeWord: 'hey nova',
   wakeWordEnabled: false,
   rememberFloatingPosition: true,
@@ -108,10 +110,28 @@ let bubbleFallbackTimer: NodeJS.Timeout | undefined
 const pendingChanges = new Map<string, PendingChange>()
 const pendingApiActions = new Map<string, PendingApiAction>()
 const pendingApplicationLaunches = new Map<string, PendingApplicationLaunch>()
+const pendingLocationAccessRequests = new Map<string, PendingLocationAccess & { taskId: string }>()
+const temporaryLocationGrants = new Map<string, Set<string>>()
 const resolvingApplicationLaunches = new Map<string, { approve: boolean; promise: Promise<string> }>()
 const resolvedApplicationLaunches = new Map<string, { approve: boolean; result: string }>()
 let apiCredentials: Record<string, string> = {}
 const activeChatRequests = new Map<string, { senderId: number; controller: AbortController }>()
+
+function resolveKnownFolderPath(requestedPath: string) {
+  const requested = requestedPath.trim()
+  const match = /^([^\\/]+)(?:[\\/]+(.*))?$/.exec(requested)
+  if (!match) return requested
+  const knownFolders: Record<string, string> = {
+    desktop: app.getPath('desktop'),
+    documents: app.getPath('documents'),
+    downloads: app.getPath('downloads'),
+    music: app.getPath('music'),
+    pictures: app.getPath('pictures'),
+    videos: app.getPath('videos')
+  }
+  const root = knownFolders[match[1].toLowerCase()]
+  return root ? path.resolve(root, match[2] ?? '') : requested
+}
 
 function rememberApplicationLaunchResolution(id: string, approve: boolean, result: string) {
   resolvedApplicationLaunches.set(id, { approve, result })
@@ -201,6 +221,12 @@ function loadSettings() {
           ? loaded.askBeforeUnlistedAppLaunch
           : defaults.askBeforeUnlistedAppLaunch,
         allowedFolders: Array.isArray(loaded.allowedFolders) ? loaded.allowedFolders.filter((folder): folder is string => typeof folder === 'string') : defaults.allowedFolders,
+        workspaceSubfolders: typeof loaded.workspaceSubfolders === 'boolean'
+          ? loaded.workspaceSubfolders
+          : defaults.workspaceSubfolders,
+        requestLocationAccessEnabled: typeof loaded.requestLocationAccessEnabled === 'boolean'
+          ? loaded.requestLocationAccessEnabled
+          : defaults.requestLocationAccessEnabled,
         allowedFolderSubfolders: Array.isArray(loaded.allowedFolderSubfolders)
           ? loaded.allowedFolderSubfolders.filter((folder): folder is string => typeof folder === 'string')
           : defaults.allowedFolderSubfolders,
@@ -234,6 +260,8 @@ function persistSettings(next: AssistantSettings) {
     throw new Error('Ollama URL must start with http:// or https://.')
   }
   if (!path.isAbsolute(next.workspace)) throw new Error('Workspace path must be absolute.')
+  if (typeof next.workspaceSubfolders !== 'boolean') throw new Error('Workspace subfolder access setting is invalid.')
+  if (typeof next.requestLocationAccessEnabled !== 'boolean') throw new Error('Temporary location access setting is invalid.')
   if (!Number.isFinite(next.speechRate) || next.speechRate < 0.5 || next.speechRate > 2) {
     throw new Error('Speech rate must be between 0.5× and 2×.')
   }
@@ -283,6 +311,21 @@ function persistSettings(next: AssistantSettings) {
   if (!next.restoreChatWindowPosition && existsSync(chatPositionPath)) unlinkSync(chatPositionPath)
   if (next.chatSizeBehavior !== 'never' && existsSync(chatSizePath)) unlinkSync(chatSizePath)
   settings = { ...next, appName: next.appName.trim(), assistantName: next.assistantName.trim(), ollamaUrl: next.ollamaUrl.replace(/\/+$/, ''), programDefaultsVersion: defaults.programDefaultsVersion }
+  if (!settings.fileOperationsEnabled || !settings.requestLocationAccessEnabled) {
+    temporaryLocationGrants.clear()
+    let removedRequests = false
+    for (const [id, request] of pendingLocationAccessRequests) {
+      pendingLocationAccessRequests.delete(id)
+      removedRequests = true
+      mainWindow?.webContents.send('location-access:resolved', {
+        id,
+        taskId: request.taskId,
+        approved: false,
+        result: 'Temporary location access was revoked in Settings.'
+      } satisfies LocationAccessResolution)
+    }
+    if (removedRequests) sendBubbleContent()
+  }
   mainWindow?.setTitle(settings.appName)
   updateTrayBranding()
   mkdirSync(path.dirname(settingsPath), { recursive: true })
@@ -641,7 +684,12 @@ function sendBubbleContent() {
     side: bubbleSide,
     status: latestBubbleIsStatus,
     changes: latestBubbleChanges,
-    applicationLaunches: latestBubbleApplicationLaunches
+    applicationLaunches: latestBubbleApplicationLaunches,
+    locationAccessRequests: [...pendingLocationAccessRequests.values()].map(({ id, path: locationPath, reason }) => ({
+      id,
+      path: locationPath,
+      reason
+    }))
   } satisfies BubbleContent)
 }
 
@@ -654,7 +702,7 @@ function bubbleBounds() {
   const bubbleHeight = latestBubbleIsStatus
     ? 78
     : Math.min(
-      Math.max(154, estimateBubbleHeight(latestBubble) + latestBubbleChanges.length * 92 + latestBubbleApplicationLaunches.length * 84),
+      Math.max(154, estimateBubbleHeight(latestBubble) + latestBubbleChanges.length * 92 + latestBubbleApplicationLaunches.length * 84 + pendingLocationAccessRequests.size * 94),
       Math.max(154, Math.floor(area.height * 0.8))
     )
   const rightX = iconBounds.x + iconBounds.width + 10
@@ -860,17 +908,26 @@ function toggleChat() {
   else openChat()
 }
 
-async function stageWorkspaceChange(args: Record<string, unknown>) {
+async function stageWorkspaceChange(args: Record<string, unknown>, taskId: string) {
   const requestedPath = String(args.path ?? '')
   const operation = String(args.operation ?? '')
-  const target = resolveAllowedFilePath(settings, requestedPath)
+  const temporaryRoots = [...(temporaryLocationGrants.get(taskId) ?? [])]
+  const target = resolveAllowedFilePath(settings, requestedPath, temporaryRoots)
   if (!['create', 'edit', 'delete'].includes(operation)) throw new Error('File operation must be create, edit, or delete.')
   const exists = existsSync(target)
   if (operation === 'create' && exists) throw new Error('That file already exists; use edit instead.')
   if ((operation === 'edit' || operation === 'delete') && !exists) throw new Error('That file does not exist.')
   const before = exists ? readFileSync(target, 'utf8') : null
   const after = operation === 'delete' ? null : String(args.content ?? '')
-  const change: PendingChange = { id: randomUUID(), path: target, operation: operation as PendingChange['operation'], before, after, createdAt: Date.now() }
+  const change: PendingChange = {
+    id: randomUUID(),
+    path: target,
+    temporaryAccessRoot: temporaryAccessRootForPath(target, temporaryRoots),
+    operation: operation as PendingChange['operation'],
+    before,
+    after,
+    createdAt: Date.now()
+  }
   if (settings.confirmFileChanges) {
     pendingChanges.set(change.id, change)
     return { result: `Staged ${operation} for ${target}. The user must approve it before the original file changes.`, change }
@@ -988,8 +1045,13 @@ function registerIpc() {
     if (request?.senderId === event.sender.id) request.controller.abort()
   })
   // This is the privileged action boundary: validate the caller, feature gate, and arguments here.
-  ipcMain.handle('tool:run', async (event, name: string, args: Record<string, unknown>) => {
+  ipcMain.handle('tool:run', async (event, name: string, args: Record<string, unknown>, taskId: string) => {
     if (event.sender !== mainWindow?.webContents) throw new Error('Agent actions are available only in the Nova chat window.')
+    if (typeof taskId !== 'string' || !/^[\da-f-]{36}$/i.test(taskId)) throw new Error('Agent task ID is invalid.')
+    const taskTemporaryRoots = () =>
+      settings.fileOperationsEnabled && settings.requestLocationAccessEnabled
+        ? [...(temporaryLocationGrants.get(taskId) ?? [])]
+        : []
     const apiOperation = findApiOperation(name)
     if (apiOperation) {
       if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('API action arguments must be an object.')
@@ -1019,10 +1081,12 @@ function registerIpc() {
     }
     return runFeatureTool(name, args, {
       settings,
-      browseAccessibleFiles: (requestedPath, offset) => browseAccessibleFiles(settings, requestedPath, offset),
-      searchAccessibleFiles: (query) => searchAccessibleFiles(settings, query),
-      readAccessibleFile: (requestedPath) => readAccessibleFile(settings, requestedPath),
-      stageFileChange: stageWorkspaceChange,
+      taskId,
+      browseAccessibleFiles: (requestedPath, offset) => browseAccessibleFiles(settings, resolveKnownFolderPath(requestedPath), offset, taskTemporaryRoots()),
+      searchAccessibleFiles: (query, requestedPath) => searchAccessibleFiles(settings, query, taskTemporaryRoots(), requestedPath),
+      readAccessibleFile: (requestedPath) => readAccessibleFile(settings, resolveKnownFolderPath(requestedPath), taskTemporaryRoots()),
+      isAccessibleFilePath: (requestedPath) => isAccessibleFilePath(settings, requestedPath, taskTemporaryRoots()),
+      stageFileChange: (args) => stageWorkspaceChange(args, taskId),
       requestApplicationLaunch: (application) => {
         const name = application.trim()
         if (!name || name.length > 500 || /[\u0000-\u001f\u007f]/.test(name)) {
@@ -1032,7 +1096,31 @@ function registerIpc() {
         const action: PendingApplicationLaunch = { id: randomUUID(), application: name }
         pendingApplicationLaunches.set(action.id, action)
         return action
-      }
+      },
+      requestLocationAccess: (requestedPath, reason, requestedTaskId) => {
+        if (requestedTaskId !== taskId) throw new Error('The access request belongs to a different agent task.')
+        if (!settings.fileOperationsEnabled || !settings.requestLocationAccessEnabled) {
+          throw new Error('Requests for temporary access to other locations are disabled in Settings.')
+        }
+        const approvedPath = resolveTemporaryFolderAccess(settings, resolveKnownFolderPath(requestedPath), taskTemporaryRoots())
+        const existing = [...pendingLocationAccessRequests.values()].find((request) =>
+          request.taskId === taskId && path.resolve(request.path).toLowerCase() === path.resolve(approvedPath).toLowerCase())
+        if (existing) return { id: existing.id, path: existing.path, reason: existing.reason }
+        if (pendingLocationAccessRequests.size >= 100) throw new Error('Too many location access requests are awaiting approval.')
+        const request: PendingLocationAccess & { taskId: string } = {
+          id: randomUUID(),
+          path: approvedPath,
+          reason: reason.trim(),
+          taskId
+        }
+        pendingLocationAccessRequests.set(request.id, request)
+        latestBubble = 'Nova needs temporary access to a folder to continue.'
+        latestBubbleIsStatus = false
+        if (!mainWindow?.isVisible()) showBubble()
+        else sendBubbleContent()
+        return { id: request.id, path: request.path, reason: request.reason }
+      },
+      resolveKnownFolderPath
     })
   })
   ipcMain.handle('api:resolve', async (event, id: string, approve: boolean) => {
@@ -1046,6 +1134,49 @@ function registerIpc() {
     const result = await executeApiAction(action)
     pendingApiActions.delete(id)
     return result
+  })
+  ipcMain.handle('location-access:resolve', (event, id: string, approve: boolean) => {
+    if ((event.sender !== mainWindow?.webContents && event.sender !== bubbleWindow?.webContents) || typeof approve !== 'boolean') {
+      throw new Error('Location access resolution request is invalid.')
+    }
+    const request = pendingLocationAccessRequests.get(id)
+    if (!request) throw new Error('This location access request is no longer pending.')
+    if (approve) {
+      if (!settings.fileOperationsEnabled || !settings.requestLocationAccessEnabled) {
+        throw new Error('Temporary location access is disabled in Settings.')
+      }
+      if (!existsSync(request.path) || !statSync(request.path).isDirectory()
+        || realpathSync(request.path).toLowerCase() !== request.path.toLowerCase()) {
+        throw new Error('The requested folder is no longer available at the approved path.')
+      }
+      const grants = temporaryLocationGrants.get(request.taskId) ?? new Set<string>()
+      grants.add(request.path)
+      temporaryLocationGrants.set(request.taskId, grants)
+    }
+    pendingLocationAccessRequests.delete(id)
+    const result = approve
+      ? `Approved access to ${request.path} for this task only. Continue the original task using this folder; no further location prompt is needed. File changes and unlisted program launches still require their separate approvals.`
+      : `Denied access to ${request.path}. No files were read or changed, and no program was launched.`
+    sendBubbleContent()
+    mainWindow?.webContents.send('location-access:resolved', {
+      id,
+      taskId: request.taskId,
+      approved: approve,
+      result
+    } satisfies LocationAccessResolution)
+    return result
+  })
+  ipcMain.on('agent-task:finish', (event, taskId: string) => {
+    if (event.sender !== mainWindow?.webContents || typeof taskId !== 'string') return
+    temporaryLocationGrants.delete(taskId)
+    let removedRequests = false
+    for (const [id, request] of pendingLocationAccessRequests) {
+      if (request.taskId === taskId) {
+        pendingLocationAccessRequests.delete(id)
+        removedRequests = true
+      }
+    }
+    if (removedRequests) sendBubbleContent()
   })
   const isAssistantWindow = (sender: Electron.WebContents) =>
     sender === mainWindow?.webContents || sender === bubbleWindow?.webContents
@@ -1103,7 +1234,8 @@ function registerIpc() {
     if (!isAssistantWindow(event.sender)) throw new Error('This file change request is invalid.')
     const change = pendingChanges.get(id)
     if (!change) throw new Error('This file change is no longer pending.')
-    const target = resolveAllowedFilePath(settings, change.path)
+    const temporaryRoots = change.temporaryAccessRoot ? [change.temporaryAccessRoot] : []
+    const target = resolveAllowedFilePath(settings, change.path, temporaryRoots)
     const current = existsSync(target) ? readFileSync(target, 'utf8') : null
     if (current !== change.before) throw new Error('The original file changed since this proposal was created. Review the file and ask Nova to prepare a fresh change.')
     if (change.operation === 'delete') {
@@ -1130,7 +1262,18 @@ function registerIpc() {
   })
   ipcMain.handle('bubble:get', (event): BubbleContent => {
     if (event.sender !== bubbleWindow?.webContents) throw new Error('Bubble content is available only in the speech bubble.')
-    return { text: latestBubble, side: bubbleSide, status: latestBubbleIsStatus, changes: latestBubbleChanges, applicationLaunches: latestBubbleApplicationLaunches }
+    return {
+      text: latestBubble,
+      side: bubbleSide,
+      status: latestBubbleIsStatus,
+      changes: latestBubbleChanges,
+      applicationLaunches: latestBubbleApplicationLaunches,
+      locationAccessRequests: [...pendingLocationAccessRequests.values()].map(({ id, path: locationPath, reason }) => ({
+        id,
+        path: locationPath,
+        reason
+      }))
+    }
   })
   ipcMain.handle('assistant:activity:get', (): AssistantActivity => assistantActivity)
   ipcMain.on('assistant:activity', (event, activity: AssistantActivity) => {

@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { closeApplication, hasUriScheme, isApplicationAllowed, openApplication, openExplorerLocation, openWindowsSettings } from './application-control'
 import type { FeatureToolHandler } from './tool-types'
 
@@ -5,6 +6,22 @@ const openApp: FeatureToolHandler = async (args, context) => {
   if (!context.settings.appControlEnabled) throw new Error('Desktop app control is disabled in Settings.')
   const requested = String(args.name ?? '').trim()
   if (!requested) throw new Error('Application name or path is required.')
+  if (!isApplicationAllowed(requested, context.settings.allowedApps)
+    && context.settings.fileOperationsEnabled
+    && context.settings.requestLocationAccessEnabled
+    && context.settings.askBeforeUnlistedAppLaunch
+    && path.isAbsolute(requested)
+    && !context.isAccessibleFilePath(requested)) {
+    const locationAccess = context.requestLocationAccess(
+      path.dirname(requested),
+      `The requested task needs Nova to locate and run this unlisted program.`,
+      context.taskId
+    )
+    return {
+      result: `Access to ${locationAccess.path} is waiting for user approval. This does not approve launching the unlisted program.`,
+      locationAccess
+    }
+  }
   if (isApplicationAllowed(requested, context.settings.allowedApps)) {
     return { result: await openApplication(requested, context.settings.allowedApps) }
   }

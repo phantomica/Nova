@@ -4,8 +4,8 @@ import type { AssistantSettings } from '../../src/shared'
 
 type AllowedRoot = { path: string; recursive: boolean; label: string }
 
-function allowedRoots(settings: AssistantSettings): AllowedRoot[] {
-  const roots: AllowedRoot[] = [{ path: path.resolve(settings.workspace), recursive: true, label: 'Workspace' }]
+function allowedRoots(settings: AssistantSettings, temporaryRoots: string[] = []): AllowedRoot[] {
+  const roots: AllowedRoot[] = [{ path: path.resolve(settings.workspace), recursive: settings.workspaceSubfolders, label: 'Workspace' }]
   for (const entry of settings.allowedFolders) {
     const separator = entry.indexOf('=')
     const label = separator > 0 ? entry.slice(0, separator).trim() : entry
@@ -16,6 +16,14 @@ function allowedRoots(settings: AssistantSettings): AllowedRoot[] {
       recursive: settings.allowedFolderSubfolders.some((folder) => path.resolve(folder).toLowerCase() === root.toLowerCase()),
       label
     })
+  }
+  for (const root of temporaryRoots) {
+    const resolved = path.resolve(root)
+    if (existsSync(resolved) && statSync(resolved).isDirectory()
+      && realpathSync(resolved).toLowerCase() !== resolved.toLowerCase()) {
+      throw new Error(`Temporary access folder changed after approval: ${resolved}`)
+    }
+    roots.push({ path: resolved, recursive: true, label: 'Temporary task access' })
   }
   const unique = new Map<string, AllowedRoot>()
   for (const root of roots) {
@@ -33,13 +41,33 @@ function containsPath(root: string, target: string) {
   return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`))
 }
 
-export function resolveAllowedFilePath(settings: AssistantSettings, requestedPath: string) {
+function resolveRequestedDirectoryPath(settings: AssistantSettings, requestedPath: string) {
+  const requested = requestedPath.trim()
+  if (!requested) return path.resolve(settings.workspace)
+  if (path.isAbsolute(requested)) return path.resolve(requested)
+  const matchingAlias = settings.allowedFolders.map((entry) => {
+    const separator = entry.indexOf('=')
+    return separator > 0 ? { alias: entry.slice(0, separator).trim(), target: entry.slice(separator + 1).trim() } : undefined
+  }).find((location) => location?.alias && (
+    location.alias.toLowerCase() === requested.toLowerCase()
+    || (requested.length > location.alias.length
+      && requested.slice(0, location.alias.length).toLowerCase() === location.alias.toLowerCase()
+      && ['\\', '/'].includes(requested[location.alias.length]))
+  ))
+  if (matchingAlias) {
+    const suffix = requested.slice(matchingAlias.alias.length).replace(/^[\\/]+/, '')
+    return path.resolve(matchingAlias.target, suffix)
+  }
+  return path.resolve(settings.workspace, requested)
+}
+
+export function resolveAllowedFilePath(settings: AssistantSettings, requestedPath: string, temporaryRoots: string[] = []) {
   const requested = requestedPath.trim()
   if (!requested) throw new Error('A file path is required.')
   const resolved = path.isAbsolute(requested)
     ? path.resolve(requested)
     : path.resolve(settings.workspace, requested)
-  const roots = allowedRoots(settings).flatMap((root) => {
+  const roots = allowedRoots(settings, temporaryRoots).flatMap((root) => {
     const locations = [{ root, base: root.path }]
     if (existsSync(root.path) && statSync(root.path).isDirectory()) {
       const realRoot = realpathSync(root.path)
@@ -69,34 +97,62 @@ export function resolveAllowedFilePath(settings: AssistantSettings, requestedPat
   return resolved
 }
 
-function resolveAllowedDirectory(settings: AssistantSettings, requestedPath: string) {
+export function resolveTemporaryFolderAccess(settings: AssistantSettings, requestedPath: string, temporaryRoots: string[] = []) {
   const requested = requestedPath.trim()
-  let resolved: string
+  if (!requested) throw new Error('A folder path is required for an access request.')
+  const resolved = resolveRequestedDirectoryPath(settings, requested)
+  if (!existsSync(resolved) || !statSync(resolved).isDirectory()) throw new Error(`Access requests must target an existing folder: ${resolved}`)
+  if (path.resolve(resolved) === path.resolve(path.parse(resolved).root)) {
+    throw new Error('Access requests cannot grant an entire drive or filesystem root.')
+  }
+  const realPath = realpathSync(resolved)
+  if (path.resolve(realPath) === path.resolve(path.parse(realPath).root)) {
+    throw new Error('Access requests cannot grant an entire drive or filesystem root.')
+  }
+  try {
+    resolveAllowedDirectory(settings, realPath, temporaryRoots)
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.startsWith('Folder must be the workspace or an approved file location')) throw error
+    return realPath
+  }
+  throw new Error('This folder is already accessible; no additional access request is needed.')
+}
+
+export function temporaryAccessRootForPath(requestedPath: string, temporaryRoots: string[]) {
+  const target = path.resolve(requestedPath)
+  return temporaryRoots
+    .filter((root) => containsPath(path.resolve(root), target))
+    .sort((left, right) => path.resolve(right).length - path.resolve(left).length)[0]
+}
+
+export function isAccessibleFilePath(settings: AssistantSettings, requestedPath: string, temporaryRoots: string[] = []) {
+  try {
+    resolveAllowedFilePath(settings, requestedPath, temporaryRoots)
+    return true
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('File path must be inside your workspace')) return false
+    throw error
+  }
+}
+
+function resolveAllowedDirectory(settings: AssistantSettings, requestedPath: string, temporaryRoots: string[] = []) {
+  const requested = requestedPath.trim()
+  const resolved = resolveRequestedDirectoryPath(settings, requested)
   let requestedRootLabel = ''
-  if (!requested) {
-    resolved = path.resolve(settings.workspace)
-  } else if (path.isAbsolute(requested)) {
-    resolved = path.resolve(requested)
-  } else {
-    const matchingAlias = settings.allowedFolders.map((entry) => {
-      const separator = entry.indexOf('=')
-      return separator > 0 ? { alias: entry.slice(0, separator).trim(), target: entry.slice(separator + 1).trim() } : undefined
-    }).find((location) => location?.alias && (
-      location.alias.toLowerCase() === requested.toLowerCase()
-      || (requested.length > location.alias.length
-        && requested.slice(0, location.alias.length).toLowerCase() === location.alias.toLowerCase()
-        && ['\\', '/'].includes(requested[location.alias.length]))
-    ))
-    if (matchingAlias) {
-      requestedRootLabel = matchingAlias.alias
-      const suffix = requested.slice(matchingAlias.alias.length).replace(/^[\\/]+/, '')
-      resolved = path.resolve(matchingAlias.target, suffix)
-    } else {
-      resolved = path.resolve(settings.workspace, requested)
-    }
+  const matchingAlias = settings.allowedFolders.map((entry) => {
+    const separator = entry.indexOf('=')
+    return separator > 0 ? { alias: entry.slice(0, separator).trim(), target: entry.slice(separator + 1).trim() } : undefined
+  }).find((location) => location?.alias && (
+    location.alias.toLowerCase() === requested.toLowerCase()
+    || (requested.length > location.alias.length
+      && requested.slice(0, location.alias.length).toLowerCase() === location.alias.toLowerCase()
+      && ['\\', '/'].includes(requested[location.alias.length]))
+  ))
+  if (matchingAlias) {
+    requestedRootLabel = matchingAlias.alias
   }
 
-  const roots = allowedRoots(settings).flatMap((root) => {
+  const roots = allowedRoots(settings, temporaryRoots).flatMap((root) => {
     const locations = [{ root, base: root.path }]
     if (existsSync(root.path) && statSync(root.path).isDirectory()) {
       const realRoot = realpathSync(root.path)
@@ -120,9 +176,9 @@ function resolveAllowedDirectory(settings: AssistantSettings, requestedPath: str
   return { path: realDirectory, root: allowed.root }
 }
 
-export function browseAccessibleFiles(settings: AssistantSettings, requestedPath: string, offset: number) {
+export function browseAccessibleFiles(settings: AssistantSettings, requestedPath: string, offset: number, temporaryRoots: string[] = []) {
   if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('File listing offset must be a non-negative whole number.')
-  const directory = resolveAllowedDirectory(settings, requestedPath)
+  const directory = resolveAllowedDirectory(settings, requestedPath, temporaryRoots)
   const entries = readdirSync(directory.path, { withFileTypes: true })
     .filter((entry) => !entry.isSymbolicLink()
       && !['.git', 'node_modules'].includes(entry.name.toLowerCase())
@@ -157,7 +213,7 @@ export function browseAccessibleFiles(settings: AssistantSettings, requestedPath
   }
 }
 
-export function searchAccessibleFiles(settings: AssistantSettings, query: string) {
+export function searchAccessibleFiles(settings: AssistantSettings, query: string, temporaryRoots: string[] = [], requestedPath?: string) {
   const normalizedQuery = query.trim().toLowerCase()
   if (normalizedQuery.length < 2 || normalizedQuery.length > 100) {
     throw new Error('File name search must be between 2 and 100 characters.')
@@ -169,37 +225,38 @@ export function searchAccessibleFiles(settings: AssistantSettings, query: string
   let truncated = false
   const maxScannedEntries = 10_000
   const maxCollectedMatches = 100
-  for (const root of allowedRoots(settings)) {
+  const searchRoots = requestedPath === undefined
+    ? allowedRoots(settings, temporaryRoots)
+    : (() => {
+      const directory = resolveAllowedDirectory(settings, requestedPath, temporaryRoots)
+      return [{ ...directory.root, path: directory.path }]
+    })()
+  for (const root of searchRoots) {
     if (!existsSync(root.path) || !statSync(root.path).isDirectory()) {
       errors.push(`${root.label}: location is unavailable (${root.path})`)
       continue
     }
     const realRoot = realpathSync(root.path)
-    const visit = (directory: string, depth: number) => {
-      if (depth > 5 || scannedEntries >= maxScannedEntries || matches.length >= maxCollectedMatches) {
-        truncated = true
-        return
-      }
+    const directories = [realRoot]
+    while (directories.length && scannedEntries < maxScannedEntries && matches.length < maxCollectedMatches) {
+      const directory = directories.pop()!
       let entries
       try {
         entries = readdirSync(directory, { withFileTypes: true })
       } catch (error) {
         errors.push(`${directory}: ${error instanceof Error ? error.message : 'could not list folder'}`)
-        return
+        continue
       }
       for (const entry of entries) {
         if (scannedEntries >= maxScannedEntries || matches.length >= maxCollectedMatches) {
           truncated = true
-          return
+          break
         }
         scannedEntries += 1
         if (entry.isSymbolicLink() || ['.git', 'node_modules'].includes(entry.name.toLowerCase())) continue
         const target = path.join(directory, entry.name)
         if (entry.isDirectory()) {
-          if (root.recursive) {
-            if (depth >= 5) truncated = true
-            else visit(target, depth + 1)
-          }
+          if (root.recursive) directories.push(target)
           continue
         }
         if (!entry.isFile() || /^\.env(?:\.|$)/i.test(entry.name)) continue
@@ -215,8 +272,9 @@ export function searchAccessibleFiles(settings: AssistantSettings, query: string
           score: (index === 0 ? 0 : 100) + fileName.length
         })
       }
+      if (directories.length && (scannedEntries >= maxScannedEntries || matches.length >= maxCollectedMatches)) truncated = true
+      if (scannedEntries >= maxScannedEntries || matches.length >= maxCollectedMatches) break
     }
-    visit(realRoot, 0)
     if (scannedEntries >= maxScannedEntries || matches.length >= maxCollectedMatches) {
       truncated = true
       break
@@ -231,8 +289,8 @@ export function searchAccessibleFiles(settings: AssistantSettings, query: string
   }
 }
 
-export function readAccessibleFile(settings: AssistantSettings, requestedPath: string) {
-  const target = resolveAllowedFilePath(settings, requestedPath)
+export function readAccessibleFile(settings: AssistantSettings, requestedPath: string, temporaryRoots: string[] = []) {
+  const target = resolveAllowedFilePath(settings, requestedPath, temporaryRoots)
   if (!existsSync(target)) throw new Error('That file does not exist.')
   const data = readFileSync(target)
   if (data.length > 128 * 1024) throw new Error('File is larger than the 128 KB read limit.')

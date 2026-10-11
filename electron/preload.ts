@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { ApplicationLaunchResolution, AssistantActivity, AssistantSettings, BubbleContent, ChangeResolution, DesktopApi, OllamaMessage, SpeechProgress } from '../src/shared'
+import type { ApplicationLaunchResolution, AssistantActivity, AssistantSettings, BubbleContent, ChangeResolution, DesktopApi, LocationAccessResolution, OllamaMessage, SpeechProgress } from '../src/shared'
 
 const desktop: DesktopApi = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
@@ -25,9 +25,16 @@ const desktop: DesktopApi = {
   beginFloatingDrag: (screenX, screenY) => ipcRenderer.send('assistant:drag-start', screenX, screenY),
   moveFloating: (screenX, screenY) => ipcRenderer.send('assistant:drag-move', screenX, screenY),
   endFloatingDrag: () => ipcRenderer.send('assistant:drag-end'),
-  runTool: (name, args) => ipcRenderer.invoke('tool:run', name, args),
+  runTool: (name, args, taskId) => ipcRenderer.invoke('tool:run', name, args, taskId),
   resolveApiAction: (id, approve) => ipcRenderer.invoke('api:resolve', id, approve),
   resolveApplicationLaunch: (id, approve) => ipcRenderer.invoke('application:resolve-launch', id, approve),
+  resolveLocationAccess: (id, approve) => ipcRenderer.invoke('location-access:resolve', id, approve),
+  onLocationAccessResolved: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, resolution: LocationAccessResolution) => listener(resolution)
+    ipcRenderer.on('location-access:resolved', handler)
+    return () => ipcRenderer.removeListener('location-access:resolved', handler)
+  },
+  finishAgentTask: (taskId) => ipcRenderer.send('agent-task:finish', taskId),
   onApplicationLaunchResolved: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, resolution: ApplicationLaunchResolution) => listener(resolution)
     ipcRenderer.on('application:launch-resolved', handler)

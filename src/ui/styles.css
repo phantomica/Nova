@@ -60,6 +60,7 @@ html:has(.floating-root), html:has(.bubble-root), body:has(.floating-root), body
 .bubble-launch-description { display: flex; align-items: center; gap: 5px; padding: 7px 8px 2px; color: #d9e2d2; font-size: 9px; }
 .bubble-launch-description svg { flex: none; color: var(--green); }
 .bubble-launch > code { display: block; max-height: 42px; overflow: auto; margin: 2px 8px 5px; color: #d8ded2; font: 9px/1.4 Consolas, 'Courier New', monospace; overflow-wrap: anywhere; }
+.bubble-access-reason { margin: 2px 8px 4px; color: #aeb7a8; font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; }
 .bubble-change-error { margin: 0; color: #f0a79e; font-size: 9px; overflow-wrap: anywhere; }
 .topbar { height: 62px; flex: 0 0 62px; display: flex; align-items: center; padding: 0 17px; border-bottom: 1px solid var(--border); -webkit-app-region: drag; }
 .brand { display: flex; align-items: center; gap: 9px; min-width: 111px; }
@@ -253,6 +254,8 @@ html:has(.floating-root), html:has(.bubble-root), body:has(.floating-root), body
 .folder-card { padding: 0 9px 4px; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--panel) 78%, transparent); }
 .folder-entry { display: grid; grid-template-columns: minmax(0, 1fr) minmax(110px, .45fr) 30px; align-items: end; gap: 8px; padding: 9px; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--panel) 78%, transparent); }
 .folder-card .folder-entry { padding: 8px 0 3px; border: 0; background: transparent; }
+.folder-card .workspace-entry { grid-template-columns: minmax(0, 1fr) auto; }
+.workspace-entry .secondary-button { height: 30px; margin-bottom: 2px; padding: 0 9px; }
 .folder-card .setting-toggle-row { padding: 6px 0; }
 .folder-card .setting-toggle-row small { max-width: none; }
 .folder-entry label { min-width: 0; margin: 0; }
