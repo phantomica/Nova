@@ -188,6 +188,8 @@ html:has(.floating-root), html:has(.bubble-root), body:has(.floating-root), body
 .settings-section { scroll-margin-top: 12px; margin: 0 auto 12px; padding: 16px; border: 1px solid var(--border); border-radius: 11px; background: linear-gradient(145deg, color-mix(in srgb, var(--panel-raised) 70%, transparent), color-mix(in srgb, var(--panel) 92%, transparent)); }
 .section-title { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; padding-bottom: 9px; color: var(--green); border-bottom: 1px solid rgba(229, 236, 220, .06); }
 .section-title h3 { margin: 0; color: #e3e7dd; font-family: 'Segoe UI', Arial, sans-serif; font-size: 12px; font-weight: 600; }
+.settings-subsection-title { display: flex; align-items: center; gap: 7px; margin-top: 15px; color: var(--green); }
+.settings-subsection-title h4 { margin: 0; color: #cbd1c5; font-family: 'Segoe UI', Arial, sans-serif; font-size: 10px; font-weight: 600; }
 .settings-section label { display: block; margin-top: 12px; color: #aeb5a8; font-size: 10px; font-weight: 500; }
 .settings-section input, .settings-section select { width: 100%; height: 34px; margin-top: 5px; padding: 0 9px; outline: 0; color: #e4e8df; background: #20241f; border: 1px solid var(--border); border-radius: 7px; font-size: 10px; }
 .settings-section .speech-rate-setting > span { display: flex; justify-content: space-between; }

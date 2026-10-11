@@ -27,6 +27,7 @@ function ChatApp() {
   const [modelReady, setModelReady] = useState<boolean | null>(null)
   const [busyChange, setBusyChange] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
   const pendingBubbleChangesRef = useRef<PendingChange[]>([])
   const pendingBubbleApplicationLaunchesRef = useRef<PendingApplicationLaunch[]>([])
   const pendingLocationAccessWaitersRef = useRef(new Map<string, { taskId: string; resolve: (resolution: LocationAccessResolution) => void }>())
@@ -116,6 +117,15 @@ function ChatApp() {
   }), [])
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [messages, busy])
+
+  useEffect(() => {
+    const focusComposer = () => {
+      if (!settingsOpen) composerRef.current?.focus()
+    }
+    focusComposer()
+    window.addEventListener('focus', focusComposer)
+    return () => window.removeEventListener('focus', focusComposer)
+  }, [settingsOpen])
 
   useEffect(() => {
     const activity: AssistantActivity = wakeHeard
@@ -779,7 +789,7 @@ function ChatApp() {
       {voiceStatus && <div className="voice-note voice-progress" role="status">{voiceStatus}</div>}
       {voiceError && <div className="voice-note">{voiceError}<button onClick={() => setVoiceError('')} aria-label="Dismiss"><X size={12} /></button></div>}
       <div className="composer">
-        <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => {
+        <textarea ref={composerRef} value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => {
           if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(input) }
         }} placeholder={listening ? 'Listening…' : `Message ${settings.assistantName}…`} rows={1} aria-label={`Message ${settings.assistantName}`} />
         <div className="composer-actions">

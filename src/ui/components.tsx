@@ -6,19 +6,19 @@ import {
 } from 'lucide-react'
 import type { ActionTrace, ApiIntegration, ApiOperation, AssistantActivity, AssistantSettings, BubbleContent, PendingApiAction, PendingApplicationLaunch, PendingChange, PendingLocationAccess } from '../shared'
 import { ChatText, lineDiff } from './formatting'
+import { featureSettingsGroups } from './settings-registry'
 
 const settingsSections = [
   { id: 'appearance', label: 'App theme', icon: Palette },
-  { id: 'model', label: 'Model', icon: Sparkles },
+  { id: 'behavior', label: 'App behaviour', icon: SlidersHorizontal },
+  { id: 'model', label: 'Local model', icon: Sparkles },
   { id: 'files', label: 'File access', icon: FolderOpen },
-  { id: 'apps', label: 'Apps & media', icon: SlidersHorizontal },
+  { id: 'apps', label: 'Apps & media', icon: Monitor },
   { id: 'system', label: 'System diagnostics', icon: Activity },
   { id: 'web', label: 'Web & APIs', icon: Globe2 },
   { id: 'voice', label: 'Voice', icon: AudioLines },
-  { id: 'desktop', label: 'Window & desktop', icon: Monitor },
-  { id: 'bubbles', label: 'Speech bubbles', icon: MessageSquare },
   { id: 'safety', label: 'File safety', icon: ShieldCheck }
-] as const
+]
 
 function sameFolderPath(left: string, right: string) {
   const normalize = (value: string) => value.replace(/[\\/]+$/, '').toLowerCase()
@@ -322,7 +322,7 @@ function SettingsPanel({ settings, onSave, onClose }: {
       <header className="settings-header"><div><span className="eyebrow">{draft.appName.toUpperCase()}</span><h2 id="settings-title">Settings</h2><p>Make {draft.appName} feel and work the way you want.</p></div><button className="icon-button" onClick={onClose} aria-label="Close settings"><X size={18} /></button></header>
       <div className="settings-workspace">
         <nav className="settings-nav" aria-label="Settings sections">
-          {settingsSections.map(({ id, label, icon: Icon }) => <button key={id} className={`settings-nav-item ${activeSection === id ? 'active' : ''}`} onClick={() => {
+          {[...settingsSections, ...featureSettingsGroups].map(({ id, label, icon: Icon }) => <button key={id} className={`settings-nav-item ${activeSection === id ? 'active' : ''}`} onClick={() => {
               setActiveSection(id)
               settingsContentRef.current?.querySelector<HTMLElement>(`[data-settings-id="${id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
             }} aria-current={activeSection === id ? 'location' : undefined}><Icon size={15} /><span>{label}</span></button>)}
@@ -356,6 +356,26 @@ function SettingsPanel({ settings, onSave, onClose }: {
             <span><b>Want to start over?</b><small>Restore the original Nova theme and accent.</small></span>
             <button className="secondary-button" onClick={() => setDraft((old) => ({ ...old, themePreset: 'nova', accentColor: '#a5ed88' }))}>Reset to default</button>
           </div>
+        </section>
+        <section className="settings-section" data-settings-id="behavior">
+          <div className="section-title"><SlidersHorizontal size={15} /><h3>App behaviour</h3></div>
+          <div className="settings-subsection-title"><Monitor size={14} /><h4>Window & desktop</h4></div>
+          <SettingToggle title="Remember floating button position" description="Restore the button where you last dragged it." checked={draft.rememberFloatingPosition} onChange={(value) => set('rememberFloatingPosition', value)} />
+          <SettingToggle title="Remember chat window position" description="Open chat where you last placed it instead of beside the floating button." checked={draft.restoreChatWindowPosition} onChange={(value) => set('restoreChatWindowPosition', value)} />
+          <label>Chat window size<select value={draft.chatSizeBehavior} onChange={(event) => set('chatSizeBehavior', event.target.value as AssistantSettings['chatSizeBehavior'])}>
+            <option value="on-open">Reset every time chat is reopened</option>
+            <option value="on-restart">Reset only when Nova restarts</option>
+            <option value="never">Never reset; remember size after restart</option>
+          </select></label>
+          <div className="settings-subsection-title"><MessageSquare size={14} /><h4>Speech bubbles</h4></div>
+          <label>Dismissal behavior<select value={draft.bubbleDurationMode} onChange={(event) => set('bubbleDurationMode', event.target.value as AssistantSettings['bubbleDurationMode'])}>
+            <option value="after-speech">After speech finishes</option>
+            <option value="fixed">Fixed duration</option>
+          </select></label>
+          <label className="speech-rate-setting"><span>Extra time before hiding <b>{draft.bubbleDurationSeconds}s</b></span>
+            <input type="range" min="2" max="60" step="1" value={draft.bubbleDurationSeconds} onChange={(event) => set('bubbleDurationSeconds', Number(event.target.value))} />
+          </label>
+          <p className="setting-hint">{draft.bubbleDurationMode === 'after-speech' ? 'Bubbles stay visible while Nova speaks, then remain for the selected extra time.' : 'Bubbles hide after the selected time, even if Nova is still speaking.'} Longer replies expand to fit where possible and scroll when they exceed available screen space.</p>
         </section>
         <section className="settings-section" data-settings-id="model">
           <div className="section-title"><Sparkles size={15} /><h3>Local model</h3></div>
@@ -406,7 +426,7 @@ function SettingsPanel({ settings, onSave, onClose }: {
           {folderError && <p className="setting-status" role="alert">{folderError}</p>}
         </section>
         <section className="settings-section" data-settings-id="apps">
-          <div className="section-title"><Monitor size={15} /><h3>Apps & desktop</h3></div>
+          <div className="section-title"><Monitor size={15} /><h3>Apps & media</h3></div>
           <SettingToggle title="Desktop apps" description="Open approved apps; close only apps Nova launched." checked={draft.appControlEnabled} onChange={(value) => set('appControlEnabled', value)} />
           <div className="program-list-heading"><span>Allowed programs</span><button className="secondary-button" onClick={addAllowedApp} disabled={draft.allowedApps.length >= 100}>Add program</button></div>
           <div className="program-list">
@@ -527,32 +547,15 @@ function SettingsPanel({ settings, onSave, onClose }: {
           <SettingToggle title="Listen for wake word" description="Keep the microphone active while Nova is open. Say your request with the wake phrase, or wait for Nova’s prompt before speaking." checked={draft.wakeWordEnabled} onChange={(value) => set('wakeWordEnabled', value)} />
           {draft.wakeWordEnabled && <label>Wake phrase<input value={draft.wakeWord} onChange={(event) => set('wakeWord', event.target.value)} placeholder="hey nova" /></label>}
         </section>
-        <section className="settings-section" data-settings-id="desktop">
-          <div className="section-title"><Monitor size={15} /><h3>Desktop</h3></div>
-          <SettingToggle title="Remember floating button position" description="Restore the button where you last dragged it." checked={draft.rememberFloatingPosition} onChange={(value) => set('rememberFloatingPosition', value)} />
-          <SettingToggle title="Remember chat window position" description="Open chat where you last placed it instead of beside the floating button." checked={draft.restoreChatWindowPosition} onChange={(value) => set('restoreChatWindowPosition', value)} />
-          <label>Chat window size<select value={draft.chatSizeBehavior} onChange={(event) => set('chatSizeBehavior', event.target.value as AssistantSettings['chatSizeBehavior'])}>
-            <option value="on-open">Reset every time chat is reopened</option>
-            <option value="on-restart">Reset only when Nova restarts</option>
-            <option value="never">Never reset; remember size after restart</option>
-          </select></label>
-        </section>
-        <section className="settings-section" data-settings-id="bubbles">
-          <div className="section-title"><Sparkles size={15} /><h3>Speech bubbles</h3></div>
-          <label>Dismissal behavior<select value={draft.bubbleDurationMode} onChange={(event) => set('bubbleDurationMode', event.target.value as AssistantSettings['bubbleDurationMode'])}>
-            <option value="after-speech">After speech finishes</option>
-            <option value="fixed">Fixed duration</option>
-          </select></label>
-          <label className="speech-rate-setting"><span>Extra time before hiding <b>{draft.bubbleDurationSeconds}s</b></span>
-            <input type="range" min="2" max="60" step="1" value={draft.bubbleDurationSeconds} onChange={(event) => set('bubbleDurationSeconds', Number(event.target.value))} />
-          </label>
-          <p className="setting-hint">{draft.bubbleDurationMode === 'after-speech' ? 'Bubbles stay visible while Nova speaks, then remain for the selected extra time.' : 'Bubbles hide after the selected time, even if Nova is still speaking.'} Longer replies expand to fit where possible and scroll when they exceed available screen space.</p>
-        </section>
         <section className="settings-section" data-settings-id="safety">
-          <div className="section-title"><FileCode2 size={15} /><h3>File safety</h3></div>
+          <div className="section-title"><ShieldCheck size={15} /><h3>File safety</h3></div>
           <SettingToggle title="Ask before applying file changes" description="Changes stay in a reviewable proposal until you confirm." checked={draft.confirmFileChanges} onChange={(value) => set('confirmFileChanges', value)} />
           {!draft.confirmFileChanges && <p className="warning-note">Without confirmation, file changes are written immediately.</p>}
         </section>
+        {featureSettingsGroups.map(({ id, label, icon: Icon, Component }) => <section className="settings-section" data-settings-id={id} key={id}>
+          <div className="section-title"><Icon size={15} /><h3>{label}</h3></div>
+          <Component settings={draft} setSetting={set} />
+        </section>)}
       </div>
       </div>
       <footer className="settings-footer">{saveError && <span className="save-error">{saveError}</span>}<button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={() => {
