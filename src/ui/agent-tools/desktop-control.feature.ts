@@ -3,11 +3,11 @@ import type { AssistantSettings } from '../../shared'
 export const desktopControlTools = [
   {
     type: 'function',
-    function: { name: 'open_application', description: 'Open an application from the user-configured allowlist. If one-time approval for unlisted programs is enabled, request to open an unlisted executable by its exact name or path; the user must approve before launch.', parameters: { type: 'object', properties: { name: { type: 'string', description: 'Configured application alias/executable, or exact executable name/path for one-time approval' } }, required: ['name'] } }
+    function: { name: 'open_application', description: 'Open a configured program by its display name or alias. Nova resolves executable names using PATH, registered Windows App Paths, and Start Menu shortcuts before launch. If the program is unlisted, Nova resolves candidates first and asks one-time approval for the exact executable path; if multiple candidates match, ask the user which exact path to use. Never report success unless the launch result confirms it.', parameters: { type: 'object', properties: { name: { type: 'string', description: 'Configured display name or alias, executable name, or exact executable path' } }, required: ['name'] } }
   },
   {
     type: 'function',
-    function: { name: 'close_application', description: 'Close an application opened by this assistant during this session.', parameters: { type: 'object', properties: { name: { type: 'string', description: 'Executable name' } }, required: ['name'] } }
+    function: { name: 'close_application', description: 'Gracefully close an installed executable application by its configured name or exact executable path. Allowlisted apps may be closed when the user explicitly asks. Unlisted apps require one-time approval. Nova sends a normal window-close request only and never force-kills a process; report clearly if the app has no closable window or refuses to close.', parameters: { type: 'object', properties: { name: { type: 'string', description: 'Configured display name or alias, executable name, or exact executable path' } }, required: ['name'] } }
   },
   {
     type: 'function',
@@ -15,7 +15,7 @@ export const desktopControlTools = [
   },
   {
     type: 'function',
-    function: { name: 'open_explorer_location', description: 'Open a configured folder in Windows File Explorer. Use a folder alias or path; subfolders are available only when enabled for that location in Settings.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'A configured folder path or alias, optionally followed by a subfolder path when enabled' } }, required: ['path'] } }
+    function: { name: 'open_explorer_location', description: 'Open any existing folder in Windows File Explorer. This only opens the user-requested folder in Explorer; it does not grant Nova permission to list, read, or change files there. Provide an absolute folder path.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'Absolute path to any existing folder' } }, required: ['path'] } }
   }
 ]
 
@@ -23,4 +23,17 @@ export function desktopControlEnabled(settings: AssistantSettings) {
   return settings.appControlEnabled
 }
 
-export const agentToolFeature = { tools: desktopControlTools, enabled: desktopControlEnabled }
+function getDesktopControlTools(settings: AssistantSettings) {
+  const capabilityByTool: Record<string, boolean> = {
+    open_application: settings.appLaunchEnabled,
+    close_application: settings.appCloseEnabled,
+    open_windows_settings: settings.windowsSettingsEnabled,
+    open_explorer_location: settings.fileExplorerEnabled
+  }
+  return desktopControlTools.filter((definition) => {
+    const tool = definition as { function?: { name?: string } }
+    return tool.function?.name ? capabilityByTool[tool.function.name] : false
+  })
+}
+
+export const agentToolFeature = { tools: desktopControlTools, enabled: desktopControlEnabled, getTools: getDesktopControlTools }

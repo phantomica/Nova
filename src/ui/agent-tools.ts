@@ -3,6 +3,7 @@ import type { ApiIntegration, AssistantSettings } from '../shared'
 type AgentToolFeature = {
   tools: object[]
   enabled: (settings: AssistantSettings) => boolean
+  getTools?: (settings: AssistantSettings) => object[]
 }
 
 const featureTools = Object.values(import.meta.glob<AgentToolFeature>('./agent-tools/*.feature.ts', {
@@ -11,7 +12,8 @@ const featureTools = Object.values(import.meta.glob<AgentToolFeature>('./agent-t
 }))
 
 function enabledTools(settings: AssistantSettings) {
-  return featureTools.flatMap(({ tools: definitions, enabled }) => enabled(settings) ? definitions : [])
+  return featureTools.flatMap(({ tools: definitions, enabled, getTools }) =>
+    enabled(settings) ? getTools?.(settings) ?? definitions : [])
 }
 
 /** Build model-facing schemas only for integrations the user has enabled. */

@@ -29,14 +29,26 @@ export type AssistantSettings = {
   fileOperationsEnabled: boolean
   requestLocationAccessEnabled: boolean
   appControlEnabled: boolean
+  appLaunchEnabled: boolean
+  appCloseEnabled: boolean
+  fileExplorerEnabled: boolean
+  windowsSettingsEnabled: boolean
+  allowAssistantShutdown: boolean
   askBeforeUnlistedAppLaunch: boolean
+  askBeforeUnlistedAppClose: boolean
   mediaControlEnabled: boolean
   apiAccessEnabled: boolean
-  allowedApps: string[]
+  allowedApps: AllowedApplication[]
   allowedFolders: string[]
   allowedFolderSubfolders: string[]
   apiIntegrations: ApiIntegration[]
   programDefaultsVersion?: number
+}
+
+export type AllowedApplication = {
+  name: string
+  target: string
+  type: 'executable' | 'link'
 }
 
 export type SystemDiagnosticCategory = 'performance' | 'processes' | 'network' | 'disks'
@@ -86,6 +98,11 @@ export type PendingApplicationLaunch = {
   application: string
 }
 
+export type PendingApplicationClose = {
+  id: string
+  application: string
+}
+
 export type PendingLocationAccess = {
   id: string
   path: string
@@ -105,11 +122,14 @@ export type ApplicationLaunchResolution = {
   result: string
 }
 
+export type ApplicationCloseResolution = ApplicationLaunchResolution
+
 export type ToolOutcome = {
   result: string
   change?: PendingChange
   apiAction?: PendingApiAction
   applicationLaunch?: PendingApplicationLaunch
+  applicationClose?: PendingApplicationClose
   locationAccess?: PendingLocationAccess
 }
 
@@ -149,6 +169,7 @@ export type BubbleContent = {
   status?: boolean
   changes?: PendingChange[]
   applicationLaunches?: PendingApplicationLaunch[]
+  applicationCloses?: PendingApplicationClose[]
   locationAccessRequests?: PendingLocationAccess[]
 }
 
@@ -170,16 +191,19 @@ export type DesktopApi = {
   getSettings: () => Promise<AssistantSettings>
   saveSettings: (settings: AssistantSettings) => Promise<AssistantSettings>
   pickFolder: () => Promise<string | undefined>
+  pickExecutable: () => Promise<string | undefined>
   onSettingsUpdated: (listener: (settings: AssistantSettings) => void) => () => void
   listModels: (url: string) => Promise<string[]>
   chat: (requestId: string, url: string, model: string, messages: OllamaMessage[], tools: object[]) => Promise<OllamaMessage>
   runTool: (name: string, args: Record<string, unknown>, taskId: string) => Promise<ToolOutcome>
   resolveApiAction: (id: string, approve: boolean) => Promise<string>
   resolveApplicationLaunch: (id: string, approve: boolean) => Promise<string>
+  resolveApplicationClose: (id: string, approve: boolean) => Promise<string>
   resolveLocationAccess: (id: string, approve: boolean) => Promise<string>
   onLocationAccessResolved: (listener: (resolution: LocationAccessResolution) => void) => () => void
   finishAgentTask: (taskId: string) => void
   onApplicationLaunchResolved: (listener: (resolution: ApplicationLaunchResolution) => void) => () => void
+  onApplicationCloseResolved: (listener: (resolution: ApplicationCloseResolution) => void) => () => void
   setApiCredential: (integrationId: string, token: string) => Promise<void>
   clearApiCredential: (integrationId: string) => Promise<void>
   getApiCredentialStatuses: (integrationIds: string[]) => Promise<Record<string, boolean>>
@@ -197,7 +221,7 @@ export type DesktopApi = {
   endFloatingDrag: () => void
   openAssistant: () => void
   hideAssistant: () => void
-  publishBubble: (text: string, changes?: PendingChange[], applicationLaunches?: PendingApplicationLaunch[]) => void
+  publishBubble: (text: string, changes?: PendingChange[], applicationLaunches?: PendingApplicationLaunch[], applicationCloses?: PendingApplicationClose[]) => void
   getBubbleContent: () => Promise<BubbleContent>
   onBubbleContent: (listener: (content: BubbleContent) => void) => () => void
   transcribeSpeech: (audio: Float32Array, language: string) => Promise<string>

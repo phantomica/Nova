@@ -1,10 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { ApplicationLaunchResolution, AssistantActivity, AssistantSettings, BubbleContent, ChangeResolution, DesktopApi, LocationAccessResolution, OllamaMessage, SpeechProgress } from '../src/shared'
+import type { ApplicationCloseResolution, ApplicationLaunchResolution, AssistantActivity, AssistantSettings, BubbleContent, ChangeResolution, DesktopApi, LocationAccessResolution, OllamaMessage, SpeechProgress } from '../src/shared'
 
 const desktop: DesktopApi = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings: AssistantSettings) => ipcRenderer.invoke('settings:save', settings),
   pickFolder: () => ipcRenderer.invoke('folder:pick'),
+  pickExecutable: () => ipcRenderer.invoke('application:pick-executable'),
   onSettingsUpdated: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, settings: AssistantSettings) => listener(settings)
     ipcRenderer.on('settings:updated', handler)
@@ -28,6 +29,7 @@ const desktop: DesktopApi = {
   runTool: (name, args, taskId) => ipcRenderer.invoke('tool:run', name, args, taskId),
   resolveApiAction: (id, approve) => ipcRenderer.invoke('api:resolve', id, approve),
   resolveApplicationLaunch: (id, approve) => ipcRenderer.invoke('application:resolve-launch', id, approve),
+  resolveApplicationClose: (id, approve) => ipcRenderer.invoke('application:resolve-close', id, approve),
   resolveLocationAccess: (id, approve) => ipcRenderer.invoke('location-access:resolve', id, approve),
   onLocationAccessResolved: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, resolution: LocationAccessResolution) => listener(resolution)
@@ -39,6 +41,11 @@ const desktop: DesktopApi = {
     const handler = (_event: Electron.IpcRendererEvent, resolution: ApplicationLaunchResolution) => listener(resolution)
     ipcRenderer.on('application:launch-resolved', handler)
     return () => ipcRenderer.removeListener('application:launch-resolved', handler)
+  },
+  onApplicationCloseResolved: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, resolution: ApplicationCloseResolution) => listener(resolution)
+    ipcRenderer.on('application:close-resolved', handler)
+    return () => ipcRenderer.removeListener('application:close-resolved', handler)
   },
   setApiCredential: (integrationId, token) => ipcRenderer.invoke('api:credential:set', integrationId, token),
   clearApiCredential: (integrationId) => ipcRenderer.invoke('api:credential:clear', integrationId),

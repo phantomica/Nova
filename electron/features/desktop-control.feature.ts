@@ -1,9 +1,9 @@
 import path from 'node:path'
-import { closeApplication, hasUriScheme, isApplicationAllowed, openApplication, openExplorerLocation, openWindowsSettings } from './application-control'
+import { closeApplication, isApplicationAllowed, openApplication, openWindowsSettings, openExplorerLocation, resolveApplicationTarget } from './application-control'
 import type { FeatureToolHandler } from './tool-types'
 
 const openApp: FeatureToolHandler = async (args, context) => {
-  if (!context.settings.appControlEnabled) throw new Error('Desktop app control is disabled in Settings.')
+  if (!context.settings.appControlEnabled || !context.settings.appLaunchEnabled) throw new Error('Application launching is disabled in Settings.')
   const requested = String(args.name ?? '').trim()
   if (!requested) throw new Error('Application name or path is required.')
   if (!isApplicationAllowed(requested, context.settings.allowedApps)
@@ -28,29 +28,41 @@ const openApp: FeatureToolHandler = async (args, context) => {
   if (!context.settings.askBeforeUnlistedAppLaunch) {
     throw new Error(`${requested} is not in your allowed apps list. Enable approval for unlisted apps in Settings to request one-time permission.`)
   }
-  if (hasUriScheme(requested)) {
-    throw new Error('One-time approval is limited to executable names and paths, not application links.')
-  }
-  const applicationLaunch = context.requestApplicationLaunch(requested)
+  const resolved = await resolveApplicationTarget(requested, context.settings.allowedApps)
+  const applicationLaunch = context.requestApplicationLaunch(resolved.target)
   return {
-    result: `Opening ${requested} is waiting for user approval. Do not claim that it has been launched.`,
+    result: `Opening ${resolved.displayName} (${resolved.target}) is waiting for user approval. Do not claim that it has been launched.`,
     applicationLaunch
   }
 }
 
-const closeApp: FeatureToolHandler = (args, context) => {
-  if (!context.settings.appControlEnabled) throw new Error('Desktop app control is disabled in Settings.')
-  return { result: closeApplication(String(args.name ?? '')) }
+const closeApp: FeatureToolHandler = async (args, context) => {
+  if (!context.settings.appControlEnabled || !context.settings.appCloseEnabled) throw new Error('Application closing is disabled in Settings.')
+  const requested = String(args.name ?? '').trim()
+  if (!requested) throw new Error('Application name or path is required.')
+  if (isApplicationAllowed(requested, context.settings.allowedApps)) {
+    return { result: await closeApplication(requested, context.settings.allowedApps) }
+  }
+  if (!context.settings.askBeforeUnlistedAppClose) {
+    throw new Error(`${requested} is not in your allowed apps list. Enable approval for closing unlisted programs in Settings to request one-time permission.`)
+  }
+  const resolved = await resolveApplicationTarget(requested, context.settings.allowedApps)
+  if (resolved.type !== 'executable') throw new Error('Nova can close executable applications, not application links.')
+  const applicationClose = context.requestApplicationClose(resolved.target)
+  return {
+    result: `Closing ${resolved.displayName} (${resolved.target}) is waiting for one-time approval. Nova will only request a graceful close.`,
+    applicationClose
+  }
 }
 
 const openSettings: FeatureToolHandler = async (args, context) => {
-  if (!context.settings.appControlEnabled) throw new Error('Desktop app control is disabled in Settings.')
+  if (!context.settings.appControlEnabled || !context.settings.windowsSettingsEnabled) throw new Error('Opening Windows Settings is disabled in Settings.')
   return { result: await openWindowsSettings(String(args.page ?? '')) }
 }
 
 const openExplorer: FeatureToolHandler = async (args, context) => {
-  if (!context.settings.appControlEnabled) throw new Error('Desktop app control is disabled in Settings.')
-  return { result: await openExplorerLocation(String(args.path ?? ''), context.settings.allowedFolders, context.settings.allowedFolderSubfolders) }
+  if (!context.settings.appControlEnabled || !context.settings.fileExplorerEnabled) throw new Error('Opening File Explorer is disabled in Settings.')
+  return { result: await openExplorerLocation(String(args.path ?? '')) }
 }
 
 export const toolHandlers: Record<string, FeatureToolHandler> = {

@@ -1,4 +1,4 @@
-import type { AssistantSettings, PendingApplicationLaunch, PendingLocationAccess, ToolOutcome } from '../../src/shared'
+import type { AssistantSettings, PendingApplicationClose, PendingApplicationLaunch, PendingLocationAccess, ToolOutcome } from '../../src/shared'
 
 export type FeatureToolContext = {
   settings: AssistantSettings
@@ -20,7 +20,9 @@ export type FeatureToolContext = {
   isAccessibleFilePath: (requestedPath: string) => boolean
   stageFileChange: (args: Record<string, unknown>) => Promise<ToolOutcome>
   requestApplicationLaunch: (application: string) => PendingApplicationLaunch
+  requestApplicationClose: (application: string) => PendingApplicationClose
   requestLocationAccess: (requestedPath: string, reason: string, taskId: string) => PendingLocationAccess
   resolveKnownFolderPath: (requestedPath: string) => string
+  shutdownAssistant: () => void
 }
 export type FeatureToolHandler = (args: Record<string, unknown>, context: FeatureToolContext) => Promise<ToolOutcome> | ToolOutcome

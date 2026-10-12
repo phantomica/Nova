@@ -1,10 +1,14 @@
 import { shell } from 'electron'
-import { spawn, type ChildProcess } from 'node:child_process'
-import { realpathSync, statSync } from 'node:fs'
+import { spawn, execFile, type ExecFileOptions } from 'node:child_process'
+import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
-import type { AssistantSettings } from '../../src/shared'
+import type { AllowedApplication, AssistantSettings } from '../../src/shared'
 
-const launchedApplications = new Map<string, ChildProcess>()
+const appPathsRegistryRoots = [
+  'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths',
+  'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths',
+  'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths'
+]
 
 export function hasUriScheme(value: string) {
   return /^[a-z][a-z\d+.-]*:/i.test(value) && !/^[a-z]:[\\/]/i.test(value)
@@ -28,56 +32,180 @@ function spawnDetached(command: string, args: string[] = []) {
   })
 }
 
-function matchingAllowedApplication(name: string, allowedApps: string[]) {
-  const requestedIsPath = path.isAbsolute(name)
-  const entries = allowedApps.map((raw) => {
-    const separator = raw.indexOf('=')
-    return separator > 0
-      ? { name: raw.slice(0, separator).trim(), target: raw.slice(separator + 1).trim() }
-      : { name: path.basename(raw.trim()), target: raw.trim() }
-  })
-  return entries.find(({ name: alias, target }) =>
-    alias.toLowerCase() === name.toLowerCase()
-    || target.toLowerCase() === name.toLowerCase()
-    || (!requestedIsPath && !hasUriScheme(target) && path.basename(target).toLowerCase() === path.basename(name).toLowerCase()))
+function matchingAllowedApplication(name: string, allowedApps: AllowedApplication[]) {
+  return allowedApps.find((application) =>
+    application.name.toLowerCase() === name.toLowerCase()
+    || application.target.toLowerCase() === name.toLowerCase()
+    || (!path.isAbsolute(name) && application.type === 'executable'
+      && path.basename(application.target).toLowerCase() === path.basename(name).toLowerCase()))
 }
 
-export function isApplicationAllowed(requested: string, allowedApps: string[]) {
+export function isApplicationAllowed(requested: string, allowedApps: AllowedApplication[]) {
   const name = validateApplicationRequest(requested)
   return Boolean(matchingAllowedApplication(name, allowedApps))
 }
 
-export async function openApplication(requested: string, allowedApps: string[], allowUnlisted = false) {
-  const name = validateApplicationRequest(requested)
-  const allowedApp = allowUnlisted ? undefined : matchingAllowedApplication(name, allowedApps)
-  if (!allowedApp && !allowUnlisted) throw new Error(`${name} is not in your allowed apps list.`)
-  if (!allowedApp && hasUriScheme(name)) {
-    throw new Error('Unlisted application approval is limited to executable names and paths, not application links.')
-  }
-  const appTarget = allowedApp
-    ? path.isAbsolute(allowedApp.target) ? path.resolve(allowedApp.target) : allowedApp.target
-    : name
-  const appKey = (allowedApp?.name ?? name).toLowerCase()
-  if (allowedApp && /^(?:spotify:|steam:)/i.test(appTarget)) {
-    await shell.openExternal(appTarget)
-    return `Opened ${allowedApp.name}.`
-  }
-  if (allowedApp && hasUriScheme(appTarget)) throw new Error('Only configured Spotify and Steam application links are supported.')
-  const child = await spawnDetached(appTarget)
-  launchedApplications.set(appKey, child)
-  return `Opened ${appTarget}.`
+function runFile(command: string, args: string[], options: ExecFileOptions = {}) {
+  return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    execFile(command, args, { windowsHide: true, ...options }, (error, stdout, stderr) => {
+      if (error) {
+        Object.assign(error, { stdout, stderr })
+        reject(error)
+      } else resolve({ stdout, stderr })
+    })
+  })
 }
 
-export function closeApplication(requested: string) {
-  const name = requested.trim()
-  const matches = [...launchedApplications.keys()].filter((key) => key === name.toLowerCase())
-  if (matches.length > 1) throw new Error(`More than one launched application matches ${name}; provide its full path.`)
-  const appKey = matches[0]
-  const child = appKey ? launchedApplications.get(appKey) : undefined
-  if (!child || child.killed) throw new Error(`Nova can only close an app that it opened during this session (${name || 'unknown app'}).`)
-  child.kill()
-  launchedApplications.delete(appKey)
-  return `Closed ${name}.`
+function executableNames(name: string) {
+  const base = path.basename(name)
+  const extensions = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+  return path.extname(base) ? [base] : extensions.map((extension) => `${base}${extension.toLowerCase()}`)
+}
+
+async function pathCandidates(name: string) {
+  const candidates = new Set<string>()
+  const directories = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)
+  for (const directory of directories) {
+    for (const executable of executableNames(name)) {
+      const candidate = path.resolve(directory, executable)
+      if (existsSync(candidate) && statSync(candidate).isFile()) candidates.add(realpathSync(candidate))
+    }
+  }
+  return candidates
+}
+
+async function appPathCandidates(name: string) {
+  const candidates = new Set<string>()
+  for (const root of appPathsRegistryRoots) {
+    try {
+      const { stdout } = await runFile('reg.exe', ['query', root, '/s'])
+      let currentMatches = false
+      for (const line of stdout.split(/\r?\n/)) {
+        const key = /^\s*HKEY_[^\r\n]+\\([^\\]+)\s*$/i.exec(line)
+        if (key) {
+          currentMatches = executableNames(name).some((executable) => key[1].toLowerCase() === executable.toLowerCase())
+          continue
+        }
+        if (!currentMatches) continue
+        const value = /^\s*\(Default\)\s+REG_SZ\s+(.+?)\s*$/i.exec(line)
+        if (!value) continue
+        const target = value[1].replace(/^"|"$/g, '')
+        if (path.isAbsolute(target) && existsSync(target) && statSync(target).isFile()) candidates.add(realpathSync(target))
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 1) throw error
+    }
+  }
+  return candidates
+}
+
+function startMenuShortcuts() {
+  const paths = [
+    path.join(process.env.APPDATA ?? '', 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+    path.join(process.env.ProgramData ?? '', 'Microsoft', 'Windows', 'Start Menu', 'Programs')
+  ].filter((directory) => directory && existsSync(directory))
+  const shortcuts: Array<{ path: string; name: string }> = []
+  let visited = 0
+  const maxVisited = 5_000
+  let truncated = false
+  while (paths.length && visited < maxVisited) {
+    const directory = paths.pop()!
+    let entries
+    try {
+      entries = readdirSync(directory, { withFileTypes: true })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EACCES') continue
+      throw error
+    }
+    for (const entry of entries) {
+      visited += 1
+      if (visited > maxVisited) {
+        truncated = true
+        break
+      }
+      const candidate = path.join(directory, entry.name)
+      if (entry.isDirectory() && !entry.isSymbolicLink()) paths.push(candidate)
+      else if (entry.isFile() && path.extname(entry.name).toLowerCase() === '.lnk') {
+        shortcuts.push({ path: candidate, name: path.basename(entry.name, '.lnk') })
+      }
+    }
+  }
+  return { shortcuts, truncated: truncated || paths.length > 0 }
+}
+
+export async function findApplicationCandidates(requested: string) {
+  const name = validateApplicationRequest(requested)
+  if (path.isAbsolute(name)) {
+    return existsSync(name) && statSync(name).isFile() ? [realpathSync(name)] : []
+  }
+  if (hasUriScheme(name)) return []
+  const normalized = path.basename(name).replace(/\.(?:exe|com|bat|cmd)$/i, '').toLowerCase()
+  const candidates = new Set<string>(await pathCandidates(name))
+  for (const candidate of await appPathCandidates(name)) candidates.add(candidate)
+  const startMenu = startMenuShortcuts()
+  for (const shortcut of startMenu.shortcuts) {
+    if (shortcut.name.toLowerCase() !== normalized) continue
+    try {
+      const details = shell.readShortcutLink(shortcut.path)
+      if (path.isAbsolute(details.target) && existsSync(details.target) && statSync(details.target).isFile()) {
+        candidates.add(realpathSync(details.target))
+      }
+    } catch (error) {
+      console.warn(`Skipping unreadable Start Menu shortcut while resolving "${name}": ${shortcut.path}`, error)
+    }
+  }
+  if (startMenu.truncated) throw new Error(`Start Menu program lookup reached its 5,000-entry limit while resolving "${name}". Specify the exact executable path or add it to the allowed programs list.`)
+  return [...candidates].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: 'base' }))
+}
+
+export async function resolveApplicationTarget(requested: string, allowedApps: AllowedApplication[]) {
+  const name = validateApplicationRequest(requested)
+  const allowedApp = matchingAllowedApplication(name, allowedApps)
+  const target = allowedApp?.target ?? name
+  if (allowedApp?.type === 'link') {
+    if (!/^(?:spotify:|steam:)/i.test(target)) throw new Error('Only configured Spotify and Steam links are supported.')
+    return { target, displayName: allowedApp.name, type: 'link' as const }
+  }
+  if (hasUriScheme(target)) {
+    throw new Error('Unlisted application approval is limited to executable names and paths, not application links.')
+  }
+  const candidates = await findApplicationCandidates(target)
+  if (!candidates.length) throw new Error(`Could not find "${name}" as an executable in PATH, Windows App Paths, or Start Menu shortcuts. Enter its full executable path or add a matching program in Settings.`)
+  if (candidates.length > 1) throw new Error(`More than one installed program matches "${name}". Specify the exact executable path:\n${candidates.join('\n')}`)
+  return { target: candidates[0], displayName: allowedApp?.name ?? name, type: 'executable' as const }
+}
+
+export async function openApplication(requested: string, allowedApps: AllowedApplication[]) {
+  const resolved = await resolveApplicationTarget(requested, allowedApps)
+  if (resolved.type === 'link') {
+    await shell.openExternal(resolved.target)
+    return `Opened ${resolved.displayName}.`
+  }
+  await spawnDetached(resolved.target)
+  return `Opened ${resolved.displayName} (${resolved.target}).`
+}
+
+export async function closeApplication(requested: string, allowedApps: AllowedApplication[]) {
+  const resolved = await resolveApplicationTarget(requested, allowedApps)
+  if (resolved.type !== 'executable') throw new Error('Nova can close executable applications, not application links.')
+  const script = [
+    '$target = [System.IO.Path]::GetFullPath($env:NOVA_CLOSE_TARGET)',
+    '$matches = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {',
+    '  try { $_.MainWindowHandle -ne 0 -and $_.Path -and [System.IO.Path]::GetFullPath($_.Path) -ieq $target } catch { $false }',
+    '})',
+    '$results = @($matches | ForEach-Object { [pscustomobject]@{ Id = $_.Id; Title = $_.MainWindowTitle; Closed = $_.CloseMainWindow() } })',
+    'if ($results.Count -eq 0) { "[]" } else { ConvertTo-Json -InputObject $results -Compress }'
+  ].join('; ')
+  const { stdout } = await runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    timeout: 10_000,
+    env: { ...process.env, NOVA_CLOSE_TARGET: resolved.target }
+  })
+  const closed = JSON.parse(stdout.trim()) as Array<{ Id: number; Title: string; Closed: boolean }>
+  if (!closed.length) throw new Error(`No open, closable window was found for ${resolved.displayName}. Nova did not force-close any process.`)
+  const accepted = closed.filter((process) => process.Closed)
+  if (!accepted.length) throw new Error(`${resolved.displayName} did not accept a graceful close request. Nova did not force-close it.`)
+  return `Sent a graceful close request to ${accepted.length} ${resolved.displayName} window${accepted.length === 1 ? '' : 's'}.`
 }
 
 export async function openWindowsSettings(page: string) {
@@ -119,41 +247,12 @@ export function configuredLocation(entry: string) {
   return { alias, target }
 }
 
-function isPathWithin(root: string, candidate: string) {
-  const relative = path.relative(root, candidate)
-  return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`))
-}
-
-export async function openExplorerLocation(requested: string, allowedFolders: string[], allowedFolderSubfolders: string[] = []) {
+export async function openExplorerLocation(requested: string) {
   const name = requested.trim()
-  if (!name) throw new Error('A configured File Explorer location is required.')
-  const requestedAbsolutePath = path.resolve(name)
-  const allowed = allowedFolders.map(configuredLocation).map(({ alias, target }) => {
-    const root = path.resolve(target)
-    const includeSubfolders = allowedFolderSubfolders.some((folder) => path.resolve(folder).toLowerCase() === root.toLowerCase())
-    if ((alias && alias.toLowerCase() === name.toLowerCase()) || root.toLowerCase() === requestedAbsolutePath.toLowerCase()) {
-      return { root, candidate: root }
-    }
-    if (!includeSubfolders) return undefined
-    let candidate: string
-    if (alias && name.length > alias.length && name.slice(0, alias.length).toLowerCase() === alias.toLowerCase()
-      && ['\\', '/'].includes(name[alias.length])) {
-      candidate = path.resolve(root, name.slice(alias.length + 1))
-    } else {
-      candidate = requestedAbsolutePath
-    }
-    return candidate !== root && isPathWithin(root, candidate) ? { root, candidate } : undefined
-  }).find((location) => location !== undefined)
-  if (!allowed) throw new Error('That folder is not in the configured File Explorer locations list or an enabled subfolder.')
-  const realRoot = realpathSync(allowed.root)
-  const target = realpathSync(allowed.candidate)
-  if (!isPathWithin(realRoot, target)) throw new Error('The requested subfolder resolves outside its approved File Explorer location.')
-  if (!statSync(target).isDirectory()) throw new Error('The configured Explorer location is not a folder.')
+  if (!name) throw new Error('A folder path is required.')
+  if (!path.isAbsolute(name)) throw new Error('File Explorer requires an absolute folder path.')
+  if (!existsSync(name) || !statSync(name).isDirectory()) throw new Error(`Folder not found: ${name}`)
+  const target = realpathSync(name)
   await spawnDetached('explorer.exe', [target])
   return `Opened ${target} in File Explorer.`
-}
-
-export function stopLaunchedApplications() {
-  for (const child of launchedApplications.values()) child.kill()
-  launchedApplications.clear()
 }

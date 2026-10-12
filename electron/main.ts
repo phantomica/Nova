@@ -5,8 +5,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { env, pipeline } from '@huggingface/transformers'
 import type { ProgressInfo } from '@huggingface/transformers'
-import type { ApiIntegration, AssistantActivity, AssistantSettings, BubbleContent, ChangeResolution, LocationAccessResolution, OllamaMessage, PendingApiAction, PendingApplicationLaunch, PendingChange, PendingLocationAccess, SpeechProgress } from '../src/shared'
-import { configuredLocation, openApplication, stopLaunchedApplications } from './features/application-control'
+import type { AllowedApplication, ApiIntegration, ApplicationCloseResolution, AssistantActivity, AssistantSettings, BubbleContent, ChangeResolution, LocationAccessResolution, OllamaMessage, PendingApiAction, PendingApplicationClose, PendingApplicationLaunch, PendingChange, PendingLocationAccess, SpeechProgress } from '../src/shared'
+import { configuredLocation, openApplication } from './features/application-control'
 import { browseAccessibleFiles, isAccessibleFilePath, readAccessibleFile, resolveAllowedFilePath, resolveTemporaryFolderAccess, searchAccessibleFiles, temporaryAccessRootForPath } from './features/file-access'
 import { runFeatureTool } from './features/tool-registry'
 
@@ -48,21 +48,37 @@ const defaults: AssistantSettings = {
   diagnosticsDisksEnabled: true,
   fileOperationsEnabled: true,
   appControlEnabled: true,
+  appLaunchEnabled: true,
+  appCloseEnabled: true,
+  fileExplorerEnabled: true,
+  windowsSettingsEnabled: true,
+  allowAssistantShutdown: false,
   askBeforeUnlistedAppLaunch: false,
+  askBeforeUnlistedAppClose: true,
   mediaControlEnabled: true,
   apiAccessEnabled: true,
   allowedApps: [
-    'Discord=Discord.exe',
-    'Firefox=firefox.exe',
-    'Obsidian=Obsidian.exe',
-    'Steam=steam.exe',
-    'Spotify=spotify:',
-    'VS Code=Code.exe'
+    { name: 'Discord', target: 'Discord.exe', type: 'executable' },
+    { name: 'Firefox', target: 'firefox.exe', type: 'executable' },
+    { name: 'Obsidian', target: 'Obsidian.exe', type: 'executable' },
+    { name: 'Steam', target: 'steam.exe', type: 'executable' },
+    { name: 'Spotify', target: 'spotify:', type: 'link' },
+    { name: 'VS Code', target: 'Code.exe', type: 'executable' }
   ],
   allowedFolders: [app.getPath('documents'), app.getPath('downloads'), app.getPath('desktop')],
   allowedFolderSubfolders: [],
   apiIntegrations: [],
-  programDefaultsVersion: 1
+  programDefaultsVersion: 2
+}
+const publishApplicationCloseResolution = (id: string, approve: boolean, result: string) => {
+  pendingApplicationCloses.delete(id)
+  latestBubbleApplicationCloses = latestBubbleApplicationCloses.filter((close) => close.id !== id)
+  sendBubbleContent()
+  mainWindow?.webContents.send('application:close-resolved', {
+    id,
+    action: approve ? 'approved' : 'denied',
+    result
+  } satisfies ApplicationCloseResolution)
 }
 
 function monitorWindow(window: BrowserWindow, label: string) {
@@ -95,6 +111,7 @@ let tray: Tray | undefined
 let latestBubble = ''
 let latestBubbleChanges: PendingChange[] = []
 let latestBubbleApplicationLaunches: PendingApplicationLaunch[] = []
+let latestBubbleApplicationCloses: PendingApplicationClose[] = []
 let bubbleSide: BubbleContent['side'] = 'left'
 let latestBubbleIsStatus = false
 let assistantActivity: AssistantActivity = 'idle'
@@ -110,10 +127,13 @@ let bubbleFallbackTimer: NodeJS.Timeout | undefined
 const pendingChanges = new Map<string, PendingChange>()
 const pendingApiActions = new Map<string, PendingApiAction>()
 const pendingApplicationLaunches = new Map<string, PendingApplicationLaunch>()
+const pendingApplicationCloses = new Map<string, PendingApplicationClose>()
 const pendingLocationAccessRequests = new Map<string, PendingLocationAccess & { taskId: string }>()
 const temporaryLocationGrants = new Map<string, Set<string>>()
 const resolvingApplicationLaunches = new Map<string, { approve: boolean; promise: Promise<string> }>()
 const resolvedApplicationLaunches = new Map<string, { approve: boolean; result: string }>()
+const resolvingApplicationCloses = new Map<string, { approve: boolean; promise: Promise<string> }>()
+const resolvedApplicationCloses = new Map<string, { approve: boolean; result: string }>()
 let apiCredentials: Record<string, string> = {}
 const activeChatRequests = new Map<string, { senderId: number; controller: AbortController }>()
 
@@ -190,12 +210,28 @@ function loadSettings() {
   try {
     if (existsSync(settingsPath)) {
       const loaded = JSON.parse(readFileSync(settingsPath, 'utf8')) as Partial<AssistantSettings> & { rememberWindowPosition?: unknown }
-      const loadedApps = Array.isArray(loaded.allowedApps) ? loaded.allowedApps.filter((item): item is string => typeof item === 'string') : undefined
+      const loadedApps = Array.isArray(loaded.allowedApps)
+        ? loaded.allowedApps.flatMap((item): AllowedApplication[] => {
+          if (typeof item === 'string') {
+            const separator = item.indexOf('=')
+            const name = separator > 0 ? item.slice(0, separator).trim() : path.basename(item.trim())
+            const target = separator > 0 ? item.slice(separator + 1).trim() : item.trim()
+            return name && target ? [{ name, target, type: /^(?:spotify:|steam:)/i.test(target) ? 'link' : 'executable' }] : []
+          }
+          if (!item || typeof item !== 'object') return []
+          const candidate = item as Partial<AllowedApplication>
+          return typeof candidate.name === 'string' && typeof candidate.target === 'string'
+            && (candidate.type === 'executable' || candidate.type === 'link')
+            ? [{ name: candidate.name, target: candidate.target, type: candidate.type }]
+            : []
+        })
+        : undefined
       const rememberFloatingPosition = typeof loaded.rememberFloatingPosition === 'boolean'
         ? loaded.rememberFloatingPosition
         : typeof loaded.rememberWindowPosition === 'boolean' ? loaded.rememberWindowPosition : defaults.rememberFloatingPosition
       const allowedApps = (loaded.programDefaultsVersion ?? 0) < defaults.programDefaultsVersion!
-        ? [...new Set([...(loadedApps ?? []), ...defaults.allowedApps])]
+        ? [...new Map([...(loadedApps ?? []), ...defaults.allowedApps].map((application) =>
+          [`${application.name.toLowerCase()}=${application.target.toLowerCase()}`, application])).values()]
         : loadedApps ?? defaults.allowedApps
       settings = {
         ...defaults,
@@ -211,6 +247,7 @@ function loadSettings() {
         rememberFloatingPosition,
         restoreChatWindowPosition: typeof loaded.restoreChatWindowPosition === 'boolean' ? loaded.restoreChatWindowPosition : defaults.restoreChatWindowPosition,
         chatSizeBehavior: ['on-open', 'on-restart', 'never'].includes(loaded.chatSizeBehavior ?? '') ? loaded.chatSizeBehavior! : defaults.chatSizeBehavior,
+        appControlEnabled: typeof loaded.appControlEnabled === 'boolean' ? loaded.appControlEnabled : defaults.appControlEnabled,
         mediaControlEnabled: typeof loaded.mediaControlEnabled === 'boolean' ? loaded.mediaControlEnabled : defaults.mediaControlEnabled,
         systemDiagnosticsEnabled: typeof loaded.systemDiagnosticsEnabled === 'boolean' ? loaded.systemDiagnosticsEnabled : defaults.systemDiagnosticsEnabled,
         diagnosticsPerformanceEnabled: typeof loaded.diagnosticsPerformanceEnabled === 'boolean' ? loaded.diagnosticsPerformanceEnabled : defaults.diagnosticsPerformanceEnabled,
@@ -220,6 +257,14 @@ function loadSettings() {
         askBeforeUnlistedAppLaunch: typeof loaded.askBeforeUnlistedAppLaunch === 'boolean'
           ? loaded.askBeforeUnlistedAppLaunch
           : defaults.askBeforeUnlistedAppLaunch,
+        askBeforeUnlistedAppClose: typeof loaded.askBeforeUnlistedAppClose === 'boolean'
+          ? loaded.askBeforeUnlistedAppClose
+          : defaults.askBeforeUnlistedAppClose,
+        appLaunchEnabled: typeof loaded.appLaunchEnabled === 'boolean' ? loaded.appLaunchEnabled : defaults.appLaunchEnabled,
+        appCloseEnabled: typeof loaded.appCloseEnabled === 'boolean' ? loaded.appCloseEnabled : defaults.appCloseEnabled,
+        fileExplorerEnabled: typeof loaded.fileExplorerEnabled === 'boolean' ? loaded.fileExplorerEnabled : defaults.fileExplorerEnabled,
+        windowsSettingsEnabled: typeof loaded.windowsSettingsEnabled === 'boolean' ? loaded.windowsSettingsEnabled : defaults.windowsSettingsEnabled,
+        allowAssistantShutdown: typeof loaded.allowAssistantShutdown === 'boolean' ? loaded.allowAssistantShutdown : defaults.allowAssistantShutdown,
         allowedFolders: Array.isArray(loaded.allowedFolders) ? loaded.allowedFolders.filter((folder): folder is string => typeof folder === 'string') : defaults.allowedFolders,
         workspaceSubfolders: typeof loaded.workspaceSubfolders === 'boolean'
           ? loaded.workspaceSubfolders
@@ -260,6 +305,12 @@ function persistSettings(next: AssistantSettings) {
     throw new Error('Ollama URL must start with http:// or https://.')
   }
   if (!path.isAbsolute(next.workspace)) throw new Error('Workspace path must be absolute.')
+  if (typeof next.appControlEnabled !== 'boolean') throw new Error('Desktop application control master setting is invalid.')
+  if (typeof next.appLaunchEnabled !== 'boolean' || typeof next.appCloseEnabled !== 'boolean'
+    || typeof next.fileExplorerEnabled !== 'boolean' || typeof next.windowsSettingsEnabled !== 'boolean'
+    || typeof next.allowAssistantShutdown !== 'boolean') {
+    throw new Error('Application control capability settings are invalid.')
+  }
   if (typeof next.workspaceSubfolders !== 'boolean') throw new Error('Workspace subfolder access setting is invalid.')
   if (typeof next.requestLocationAccessEnabled !== 'boolean') throw new Error('Temporary location access setting is invalid.')
   if (!Number.isFinite(next.speechRate) || next.speechRate < 0.5 || next.speechRate > 2) {
@@ -280,16 +331,23 @@ function persistSettings(next: AssistantSettings) {
   if (!['on-open', 'on-restart', 'never'].includes(next.chatSizeBehavior)) throw new Error('Chat window size behavior is invalid.')
   if (typeof next.apiAccessEnabled !== 'boolean') throw new Error('API access setting is invalid.')
   if (typeof next.askBeforeUnlistedAppLaunch !== 'boolean') throw new Error('Unlisted application approval setting is invalid.')
+  if (typeof next.askBeforeUnlistedAppClose !== 'boolean') throw new Error('Unlisted application close approval setting is invalid.')
   if (typeof next.mediaControlEnabled !== 'boolean') throw new Error('Windows media control setting is invalid.')
   if (typeof next.systemDiagnosticsEnabled !== 'boolean' || typeof next.diagnosticsPerformanceEnabled !== 'boolean'
     || typeof next.diagnosticsProcessesEnabled !== 'boolean' || typeof next.diagnosticsNetworkEnabled !== 'boolean'
     || typeof next.diagnosticsDisksEnabled !== 'boolean') {
     throw new Error('System diagnostics settings are invalid.')
   }
-  if (!Array.isArray(next.allowedApps) || next.allowedApps.length > 100 || next.allowedApps.some((entry) => typeof entry !== 'string' || !entry.trim() || entry.length > 500)) {
-    throw new Error('Allowed applications must be a list of up to 100 non-empty names or paths.')
+  if (!Array.isArray(next.allowedApps) || next.allowedApps.length > 100 || next.allowedApps.some((entry) =>
+    !entry || typeof entry !== 'object'
+    || typeof entry.name !== 'string' || !entry.name.trim() || entry.name.length > 100 || /[\u0000-\u001f\u007f]/.test(entry.name)
+    || typeof entry.target !== 'string' || !entry.target.trim() || entry.target.length > 500 || /[\u0000-\u001f\u007f]/.test(entry.target)
+    || (entry.type !== 'executable' && entry.type !== 'link')
+    || (entry.type === 'link' && !/^(?:spotify:|steam:)/i.test(entry.target))
+    || (entry.type === 'executable' && /^[a-z][a-z\d+.-]*:/i.test(entry.target) && !/^[a-z]:[\\/]/i.test(entry.target)))) {
+    throw new Error('Allowed applications must contain up to 100 valid named executable or supported-link entries.')
   }
-  if (!Array.isArray(next.allowedFolders) || next.allowedFolders.length > 50) throw new Error('Configure no more than 50 Explorer locations.')
+  if (!Array.isArray(next.allowedFolders) || next.allowedFolders.length > 50) throw new Error('Configure no more than 50 approved file-access locations.')
   for (const entry of next.allowedFolders) {
     if (typeof entry !== 'string' || entry.length > 1000) throw new Error('Explorer location entries must be paths up to 1,000 characters.')
     const { alias, target } = configuredLocation(entry)
@@ -302,7 +360,7 @@ function persistSettings(next: AssistantSettings) {
   const configuredFolderPaths = new Set(next.allowedFolders.map((entry) => path.resolve(configuredLocation(entry).target).toLowerCase()))
   for (const folder of next.allowedFolderSubfolders) {
     if (typeof folder !== 'string' || !path.isAbsolute(folder) || !configuredFolderPaths.has(path.resolve(folder).toLowerCase())) {
-      throw new Error('Subfolder access must refer to an approved File Explorer location.')
+      throw new Error('Subfolder access must refer to an approved file-access location.')
     }
   }
   validateApiIntegrations(next.apiIntegrations)
@@ -311,6 +369,29 @@ function persistSettings(next: AssistantSettings) {
   if (!next.restoreChatWindowPosition && existsSync(chatPositionPath)) unlinkSync(chatPositionPath)
   if (next.chatSizeBehavior !== 'never' && existsSync(chatSizePath)) unlinkSync(chatSizePath)
   settings = { ...next, appName: next.appName.trim(), assistantName: next.assistantName.trim(), ollamaUrl: next.ollamaUrl.replace(/\/+$/, ''), programDefaultsVersion: defaults.programDefaultsVersion }
+  if (!settings.appControlEnabled || !settings.appLaunchEnabled || !settings.askBeforeUnlistedAppLaunch) {
+    for (const [id, action] of pendingApplicationLaunches) {
+      pendingApplicationLaunches.delete(id)
+      mainWindow?.webContents.send('application:launch-resolved', {
+        id,
+        action: 'denied',
+        result: `Application launch permission was revoked before ${action.application} opened.`
+      })
+    }
+    latestBubbleApplicationLaunches = []
+  }
+  if (!settings.appControlEnabled || !settings.appCloseEnabled || !settings.askBeforeUnlistedAppClose) {
+    for (const [id, action] of pendingApplicationCloses) {
+      pendingApplicationCloses.delete(id)
+      mainWindow?.webContents.send('application:close-resolved', {
+        id,
+        action: 'denied',
+        result: `Application close permission was revoked before ${action.application} was closed.`
+      } satisfies ApplicationCloseResolution)
+    }
+    latestBubbleApplicationCloses = []
+  }
+  sendBubbleContent()
   if (!settings.fileOperationsEnabled || !settings.requestLocationAccessEnabled) {
     temporaryLocationGrants.clear()
     let removedRequests = false
@@ -649,6 +730,7 @@ function scheduleBubbleDismissal() {
     latestBubble = ''
     latestBubbleChanges = []
     latestBubbleApplicationLaunches = []
+    latestBubbleApplicationCloses = []
     bubbleWindow?.hide()
   }, settings.bubbleDurationSeconds * 1000)
 }
@@ -673,6 +755,7 @@ function scheduleBubbleFallback() {
       latestBubble = ''
       latestBubbleChanges = []
       latestBubbleApplicationLaunches = []
+      latestBubbleApplicationCloses = []
       bubbleWindow?.hide()
     }
   }, (responseDuration + settings.bubbleDurationSeconds) * 1000)
@@ -685,6 +768,7 @@ function sendBubbleContent() {
     status: latestBubbleIsStatus,
     changes: latestBubbleChanges,
     applicationLaunches: latestBubbleApplicationLaunches,
+    applicationCloses: latestBubbleApplicationCloses,
     locationAccessRequests: [...pendingLocationAccessRequests.values()].map(({ id, path: locationPath, reason }) => ({
       id,
       path: locationPath,
@@ -702,7 +786,7 @@ function bubbleBounds() {
   const bubbleHeight = latestBubbleIsStatus
     ? 78
     : Math.min(
-      Math.max(154, estimateBubbleHeight(latestBubble) + latestBubbleChanges.length * 92 + latestBubbleApplicationLaunches.length * 84 + pendingLocationAccessRequests.size * 94),
+      Math.max(154, estimateBubbleHeight(latestBubble) + latestBubbleChanges.length * 92 + latestBubbleApplicationLaunches.length * 84 + latestBubbleApplicationCloses.length * 84 + pendingLocationAccessRequests.size * 94),
       Math.max(154, Math.floor(area.height * 0.8))
     )
   const rightX = iconBounds.x + iconBounds.width + 10
@@ -838,6 +922,7 @@ function hideChat() {
     latestBubble = 'Thinking'
     latestBubbleChanges = []
     latestBubbleApplicationLaunches = []
+    latestBubbleApplicationCloses = []
     latestBubbleIsStatus = true
   }
   showBubble()
@@ -866,6 +951,7 @@ function setAssistantActivity(activity: AssistantActivity) {
     latestBubble = 'Thinking'
     latestBubbleChanges = []
     latestBubbleApplicationLaunches = []
+    latestBubbleApplicationCloses = []
     latestBubbleIsStatus = true
     if (bubbleHideTimer) clearTimeout(bubbleHideTimer)
     bubbleHideTimer = undefined
@@ -876,6 +962,7 @@ function setAssistantActivity(activity: AssistantActivity) {
     latestBubble = ''
     latestBubbleChanges = []
     latestBubbleApplicationLaunches = []
+    latestBubbleApplicationCloses = []
     latestBubbleIsStatus = false
     hideBubble()
   }
@@ -979,8 +1066,24 @@ function registerIpc() {
     folderPickerOpen = true
     try {
       const result = await dialog.showOpenDialog(parent, {
-        title: 'Choose an approved File Explorer location',
+        title: 'Choose an approved file-access location',
         properties: ['openDirectory', 'createDirectory']
+      })
+      return result.canceled ? undefined : result.filePaths[0]
+    } finally {
+      folderPickerOpen = false
+    }
+  })
+  ipcMain.handle('application:pick-executable', async (event) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('Programs can be selected only in the Nova chat window.')
+    const parent = mainWindow
+    if (!parent || parent.isDestroyed()) throw new Error('The Nova chat window is unavailable.')
+    folderPickerOpen = true
+    try {
+      const result = await dialog.showOpenDialog(parent, {
+        title: 'Choose an executable',
+        properties: ['openFile'],
+        filters: [{ name: 'Windows programs', extensions: ['exe'] }]
       })
       return result.canceled ? undefined : result.filePaths[0]
     } finally {
@@ -1097,6 +1200,20 @@ function registerIpc() {
         pendingApplicationLaunches.set(action.id, action)
         return action
       },
+      requestApplicationClose: (application) => {
+        const name = application.trim()
+        if (!name || name.length > 500 || /[\u0000-\u001f\u007f]/.test(name)) {
+          throw new Error('Application name or path is invalid.')
+        }
+        if (pendingApplicationCloses.size >= 100) throw new Error('Too many applications are awaiting close approval.')
+        const action: PendingApplicationClose = { id: randomUUID(), application: name }
+        pendingApplicationCloses.set(action.id, action)
+        latestBubble = 'Nova needs permission to close an unlisted program.'
+        latestBubbleIsStatus = false
+        if (!mainWindow?.isVisible()) showBubble()
+        else sendBubbleContent()
+        return action
+      },
       requestLocationAccess: (requestedPath, reason, requestedTaskId) => {
         if (requestedTaskId !== taskId) throw new Error('The access request belongs to a different agent task.')
         if (!settings.fileOperationsEnabled || !settings.requestLocationAccessEnabled) {
@@ -1120,7 +1237,8 @@ function registerIpc() {
         else sendBubbleContent()
         return { id: request.id, path: request.path, reason: request.reason }
       },
-      resolveKnownFolderPath
+      resolveKnownFolderPath,
+      shutdownAssistant: () => { setTimeout(() => app.quit(), 250) }
     })
   })
   ipcMain.handle('api:resolve', async (event, id: string, approve: boolean) => {
@@ -1190,6 +1308,13 @@ function registerIpc() {
       result
     })
   }
+  const rememberApplicationCloseResolution = (id: string, approve: boolean, result: string) => {
+    resolvedApplicationCloses.set(id, { approve, result })
+    if (resolvedApplicationCloses.size > 100) {
+      const oldestId = resolvedApplicationCloses.keys().next().value
+      if (oldestId) resolvedApplicationCloses.delete(oldestId)
+    }
+  }
   ipcMain.handle('application:resolve-launch', async (event, id: string, approve: boolean) => {
     if (!isAssistantWindow(event.sender) || typeof approve !== 'boolean') {
       throw new Error('Application launch approval request is invalid.')
@@ -1206,7 +1331,7 @@ function registerIpc() {
     }
     const action = pendingApplicationLaunches.get(id)
     if (!action) throw new Error('This application launch is no longer awaiting approval.')
-    if (approve && (!settings.appControlEnabled || !settings.askBeforeUnlistedAppLaunch)) {
+    if (approve && (!settings.appControlEnabled || !settings.appLaunchEnabled || !settings.askBeforeUnlistedAppLaunch)) {
       throw new Error('Unlisted application approval is disabled in Settings.')
     }
     if (!approve) {
@@ -1216,13 +1341,48 @@ function registerIpc() {
       return result
     }
     const promise = Promise.resolve().then(() =>
-      openApplication(action.application, settings.allowedApps, true)
+      openApplication(action.application, [])
     ).then((result) => {
       rememberApplicationLaunchResolution(id, true, result)
       publishApplicationLaunchResolution(id, true, result)
       return result
     }).finally(() => resolvingApplicationLaunches.delete(id))
     resolvingApplicationLaunches.set(id, { approve: true, promise })
+    return promise
+  })
+  ipcMain.handle('application:resolve-close', async (event, id: string, approve: boolean) => {
+    if (!isAssistantWindow(event.sender) || typeof approve !== 'boolean') {
+      throw new Error('Application close approval request is invalid.')
+    }
+    const resolved = resolvedApplicationCloses.get(id)
+    if (resolved) {
+      if (resolved.approve !== approve) throw new Error('This application close has already been resolved.')
+      return resolved.result
+    }
+    const resolving = resolvingApplicationCloses.get(id)
+    if (resolving) {
+      if (resolving.approve !== approve) throw new Error('This application close is already being resolved.')
+      return resolving.promise
+    }
+    const action = pendingApplicationCloses.get(id)
+    if (!action) throw new Error('This application close is no longer awaiting approval.')
+    if (approve && (!settings.appControlEnabled || !settings.appCloseEnabled || !settings.askBeforeUnlistedAppClose)) {
+      throw new Error('Unlisted application close approval is disabled in Settings.')
+    }
+    if (!approve) {
+      const result = `Denied. ${action.application} was not closed.`
+      rememberApplicationCloseResolution(id, false, result)
+      publishApplicationCloseResolution(id, false, result)
+      return result
+    }
+    const promise = Promise.resolve().then(() =>
+      closeApplication(action.application, [])
+    ).then((result) => {
+      rememberApplicationCloseResolution(id, true, result)
+      publishApplicationCloseResolution(id, true, result)
+      return result
+    }).finally(() => resolvingApplicationCloses.delete(id))
+    resolvingApplicationCloses.set(id, { approve: true, promise })
     return promise
   })
   const resolveBubbleChange = (id: string, action: ChangeResolution['action']) => {
@@ -1268,6 +1428,7 @@ function registerIpc() {
       status: latestBubbleIsStatus,
       changes: latestBubbleChanges,
       applicationLaunches: latestBubbleApplicationLaunches,
+      applicationCloses: latestBubbleApplicationCloses,
       locationAccessRequests: [...pendingLocationAccessRequests.values()].map(({ id, path: locationPath, reason }) => ({
         id,
         path: locationPath,
@@ -1296,12 +1457,18 @@ function registerIpc() {
   ipcMain.on('assistant:drag-end', (event) => {
     if (event.sender === floatingWindow?.webContents) floatingDragOrigin = undefined
   })
-  ipcMain.on('bubble:publish', (event, text: string, changes?: PendingChange[], applicationLaunches?: PendingApplicationLaunch[]) => {
+  ipcMain.on('bubble:publish', (event, text: string, changes?: PendingChange[], applicationLaunches?: PendingApplicationLaunch[], applicationCloses?: PendingApplicationClose[]) => {
     if (event.sender !== mainWindow?.webContents || typeof text !== 'string') return
     latestBubble = text
     latestBubbleChanges = Array.isArray(changes)
       ? changes.flatMap((change) => {
         const pending = typeof change?.id === 'string' ? pendingChanges.get(change.id) : undefined
+        return pending ? [pending] : []
+      })
+      : []
+    latestBubbleApplicationCloses = Array.isArray(applicationCloses)
+      ? applicationCloses.flatMap((close) => {
+        const pending = typeof close?.id === 'string' ? pendingApplicationCloses.get(close.id) : undefined
         return pending ? [pending] : []
       })
       : []
@@ -1370,5 +1537,4 @@ app.on('before-quit', () => {
       writeFileSync(chatSizePath, JSON.stringify({ width, height }), 'utf8')
     } catch (error) { console.error('Could not save Nova chat window size:', error) }
   }
-  stopLaunchedApplications()
 })

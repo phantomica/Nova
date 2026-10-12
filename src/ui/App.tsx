@@ -4,12 +4,12 @@ import {
   LoaderCircle, Mic, MicOff, Minus, Square, Settings2, ShieldCheck, Sparkles,
   Volume2, VolumeX, X
 } from 'lucide-react'
-import type { ActionTrace, AssistantActivity, AssistantSettings, LocationAccessResolution, OllamaMessage, PendingApiAction, PendingApplicationLaunch, PendingChange, PendingLocationAccess } from '../shared'
+import type { ActionTrace, AssistantActivity, AssistantSettings, LocationAccessResolution, OllamaMessage, PendingApiAction, PendingApplicationClose, PendingApplicationLaunch, PendingChange, PendingLocationAccess } from '../shared'
 import { apiTools, enabledTools } from './agent-tools'
 import { ChatText, decodeForWhisper, plainTextForSpeech } from './formatting'
 import { ActionTraceCard, ChangeCard, FloatingButton, SettingsPanel, SpeechBubble, assistantSystemPrompt } from './components'
 
-type ChatMessage = { id: string; role: 'user' | 'assistant'; content: string; change?: PendingChange; trace?: ActionTrace; apiAction?: PendingApiAction; applicationLaunch?: PendingApplicationLaunch; locationAccess?: PendingLocationAccess }
+type ChatMessage = { id: string; role: 'user' | 'assistant'; content: string; change?: PendingChange; trace?: ActionTrace; apiAction?: PendingApiAction; applicationLaunch?: PendingApplicationLaunch; applicationClose?: PendingApplicationClose; locationAccess?: PendingLocationAccess }
 
 function ChatApp() {
   const [settings, setSettings] = useState<AssistantSettings | null>(null)
@@ -30,6 +30,7 @@ function ChatApp() {
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const pendingBubbleChangesRef = useRef<PendingChange[]>([])
   const pendingBubbleApplicationLaunchesRef = useRef<PendingApplicationLaunch[]>([])
+  const pendingBubbleApplicationClosesRef = useRef<PendingApplicationClose[]>([])
   const pendingLocationAccessWaitersRef = useRef(new Map<string, { taskId: string; resolve: (resolution: LocationAccessResolution) => void }>())
   const resolvedLocationAccessRef = useRef(new Map<string, LocationAccessResolution>())
   const cancelledLocationAccessRef = useRef(new Set<string>())
@@ -94,6 +95,17 @@ function ChatApp() {
       ? {
         ...message,
         applicationLaunch: undefined,
+        trace: { ...message.trace!, status: action === 'approved' ? 'succeeded' : 'denied', result }
+      }
+      : message))
+  }), [])
+
+  useEffect(() => window.desktop.onApplicationCloseResolved(({ id, action, result }) => {
+    pendingBubbleApplicationClosesRef.current = pendingBubbleApplicationClosesRef.current.filter((close) => close.id !== id)
+    setMessages((old) => old.map((message) => message.applicationClose?.id === id
+      ? {
+        ...message,
+        applicationClose: undefined,
         trace: { ...message.trace!, status: action === 'approved' ? 'succeeded' : 'denied', result }
       }
       : message))
@@ -234,9 +246,10 @@ function ChatApp() {
             setMessages((old) => old.map((message) => message.id === traceId
               ? {
                 ...message,
-                trace: { ...message.trace!, status: outcome.apiAction || outcome.applicationLaunch || outcome.locationAccess ? 'pending' : 'succeeded', result: outcome.result },
+                trace: { ...message.trace!, status: outcome.apiAction || outcome.applicationLaunch || outcome.applicationClose || outcome.locationAccess ? 'pending' : 'succeeded', result: outcome.result },
                 apiAction: outcome.apiAction,
                 applicationLaunch: outcome.applicationLaunch,
+                applicationClose: outcome.applicationClose,
                 locationAccess: outcome.locationAccess
               }
               : message))
@@ -284,7 +297,7 @@ function ChatApp() {
                   ...message.trace!,
                   status: accessDenied
                     ? 'denied'
-                    : outcome.apiAction || outcome.applicationLaunch || outcome.locationAccess
+                    : outcome.apiAction || outcome.applicationLaunch || outcome.applicationClose || outcome.locationAccess
                       ? 'pending'
                       : 'succeeded',
                   result: outcome.result
@@ -298,6 +311,9 @@ function ChatApp() {
             }
             if (outcome.applicationLaunch) {
               pendingBubbleApplicationLaunchesRef.current = [...pendingBubbleApplicationLaunchesRef.current, outcome.applicationLaunch]
+            }
+            if (outcome.applicationClose) {
+              pendingBubbleApplicationClosesRef.current = [...pendingBubbleApplicationClosesRef.current, outcome.applicationClose]
             }
             if (cancelledChatRequestsRef.current.has(requestId)) return
           } catch (reason) {
@@ -318,7 +334,7 @@ function ChatApp() {
       messageHistory.current = history
       const content = response.content || 'Done.'
       setMessages((old) => [...old, { id: crypto.randomUUID(), role: 'assistant', content }])
-      window.desktop.publishBubble(content, pendingBubbleChangesRef.current, pendingBubbleApplicationLaunchesRef.current)
+      window.desktop.publishBubble(content, pendingBubbleChangesRef.current, pendingBubbleApplicationLaunchesRef.current, pendingBubbleApplicationClosesRef.current)
       say(content)
     } catch (reason) {
       if (cancelledChatRequestsRef.current.has(requestId)) {
@@ -358,6 +374,18 @@ function ChatApp() {
       ? {
         ...message,
         applicationLaunch: undefined,
+        trace: { ...message.trace!, status: approve ? 'succeeded' : 'denied', result }
+      }
+      : message))
+    return result
+  }
+
+  const resolveApplicationClose = async (id: string, approve: boolean) => {
+    const result = await window.desktop.resolveApplicationClose(id, approve)
+    setMessages((old) => old.map((message) => message.applicationClose?.id === id
+      ? {
+        ...message,
+        applicationClose: undefined,
         trace: { ...message.trace!, status: approve ? 'succeeded' : 'denied', result }
       }
       : message))
@@ -772,9 +800,11 @@ function ChatApp() {
             trace={message.trace}
             apiAction={message.apiAction}
             applicationLaunch={message.applicationLaunch}
+            applicationClose={message.applicationClose}
             locationAccess={message.locationAccess}
             onResolve={resolveApiAction}
             onResolveApplicationLaunch={resolveApplicationLaunch}
+            onResolveApplicationClose={resolveApplicationClose}
             onResolveLocationAccess={resolveLocationAccess}
           />}
           {message.change && <ChangeCard change={message.change} onApprove={(change, content) => void approve(change, content)} onUpdate={updateProposal} onDiscard={(change) => void discard(change)} busy={busyChange === message.change.id} />}

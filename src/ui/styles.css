@@ -266,11 +266,12 @@ html:has(.floating-root), html:has(.bubble-root), body:has(.floating-root), body
 .folder-entry .remove-program-button { margin: 0 0 1px; }
 .setting-empty { margin: 0; padding: 13px 10px; border: 1px dashed var(--border); border-radius: 7px; color: var(--muted); font-size: 9px; line-height: 1.5; text-align: center; }
 .program-list { display: flex; flex-direction: column; gap: 7px; margin-top: 8px; }
-.program-entry { position: relative; display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr) 28px; align-items: end; gap: 7px; padding: 8px; border: 1px solid var(--border); border-radius: 7px; background: rgba(12, 15, 12, .3); }
-.program-entry:has(.program-target-hint) { grid-template-columns: minmax(0, 1fr) 28px; }
+.program-entry { position: relative; display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, .75fr) minmax(0, 1.4fr) auto 28px; align-items: end; gap: 7px; padding: 8px; border: 1px solid var(--border); border-radius: 7px; background: rgba(12, 15, 12, .3); }
 .program-entry label { min-width: 0; margin: 0; }
 .program-entry label > span { display: block; color: #899183; font-size: 8px; }
 .program-entry input { min-width: 0; }
+.program-entry select { min-width: 0; }
+.program-entry > .secondary-button { min-height: 29px; padding: 0 8px; font-size: 9px; }
 .program-target-hint { grid-column: 1; margin: -2px 0 0; color: #777f73; font-size: 8px; line-height: 1.35; overflow-wrap: anywhere; }
 .remove-program-button { width: 28px; height: 29px; display: grid; place-items: center; margin-bottom: 1px; color: #a7aaa0; border: 1px solid var(--border); border-radius: 6px; background: #222620; cursor: pointer; }
 .remove-program-button:hover { color: #f0a79e; background: #322321; }
