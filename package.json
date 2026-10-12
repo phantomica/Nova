@@ -1,9 +1,11 @@
 {
   "name": "nova-desktop-ai",
+  "productName": "Nova",
   "version": "0.1.0",
   "private": true,
+  "author": "Nova contributors",
   "description": "A local-first desktop voice assistant powered by Ollama.",
-  "main": "out/main/index.js",
+  "main": "dist/main/index.js",
   "engines": {
     "node": ">=22.12.0"
   },
@@ -11,6 +13,9 @@
     "predev": "node scripts/ensure-electron.cjs",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "build:app-icon": "node scripts/build-windows-icon.cjs",
+    "package:win": "npm run build && npm run build:app-icon && electron-forge package --platform win32",
+    "make:win": "npm run build && npm run build:app-icon && electron-forge make --platform win32",
     "prestart": "node scripts/ensure-electron.cjs",
     "start": "electron .",
     "typecheck": "tsc --noEmit"
@@ -19,9 +24,12 @@
     "@huggingface/transformers": "^4.3.1",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "sharp": "^0.35.5"
   },
   "devDependencies": {
+    "@electron-forge/cli": "^8.0.1",
+    "@electron-forge/maker-squirrel": "^8.0.1",
     "@types/node": "^22.20.5",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",

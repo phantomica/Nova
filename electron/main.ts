@@ -4,13 +4,18 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { env, pipeline } from '@huggingface/transformers'
+import sharp from 'sharp'
 import type { ProgressInfo } from '@huggingface/transformers'
+import type { NativeImage } from 'electron'
 import type { AllowedApplication, ApiIntegration, ApplicationCloseResolution, AssistantActivity, AssistantSettings, BubbleContent, ChangeResolution, LocationAccessResolution, OllamaMessage, PendingApiAction, PendingApplicationClose, PendingApplicationLaunch, PendingChange, PendingLocationAccess, SpeechProgress } from '../src/shared'
+import appIconTemplatePath from '../resources/icons/nova-app.svg?asset'
+import trayIconTemplatePath from '../resources/icons/nova-tray.svg?asset'
 import { configuredLocation, openApplication } from './features/application-control'
 import { browseAccessibleFiles, isAccessibleFilePath, readAccessibleFile, resolveAllowedFilePath, resolveTemporaryFolderAccess, searchAccessibleFiles, temporaryAccessRootForPath } from './features/file-access'
 import { runFeatureTool } from './features/tool-registry'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
+if (process.platform === 'win32') app.setAppUserModelId('com.phantomica.nova')
 // Privileged operations and persistent settings stay in the main process; renderer windows use typed IPC.
 const settingsPath = path.join(app.getPath('userData'), 'settings.json')
 const apiCredentialsPath = path.join(app.getPath('userData'), 'api-credentials.json')
@@ -108,6 +113,7 @@ let floatingWindow: BrowserWindow | undefined
 let bubbleWindow: BrowserWindow | undefined
 let folderPickerOpen = false
 let tray: Tray | undefined
+let appWindowIcon = nativeImage.createEmpty()
 let latestBubble = ''
 let latestBubbleChanges: PendingChange[] = []
 let latestBubbleApplicationLaunches: PendingApplicationLaunch[] = []
@@ -168,6 +174,44 @@ function updateTrayBranding() {
     { label: `Open ${settings.appName}`, click: openChat },
     { label: 'Quit', click: () => app.quit() }
   ]))
+}
+
+function themeBackground(themePreset: AssistantSettings['themePreset']) {
+  switch (themePreset) {
+    case 'midnight': return '#0e121c'
+    case 'dusk': return '#171218'
+    case 'nova': return '#111311'
+    default: throw new Error('App theme preset is invalid.')
+  }
+}
+
+async function createSystemIcons(iconSettings: AssistantSettings) {
+  if (typeof iconSettings.accentColor !== 'string' || !/^#[\da-f]{6}$/i.test(iconSettings.accentColor)) {
+    throw new Error('Accent color must be a six-digit hex color.')
+  }
+  const templateValues = {
+    '{{ACCENT_COLOR}}': iconSettings.accentColor,
+    '{{BACKGROUND_COLOR}}': themeBackground(iconSettings.themePreset)
+  }
+  const renderTemplate = async (templatePath: string, size: number) => {
+    let svg = readFileSync(templatePath, 'utf8')
+    for (const [placeholder, value] of Object.entries(templateValues)) svg = svg.replaceAll(placeholder, value)
+    const png = await sharp(Buffer.from(svg)).resize(size, size).png().toBuffer()
+    const image = nativeImage.createFromBuffer(png)
+    if (image.isEmpty()) throw new Error(`Nova icon could not be rendered from ${templatePath}.`)
+    return image
+  }
+  const [appIcon, trayIcon] = await Promise.all([
+    renderTemplate(appIconTemplatePath, 256),
+    renderTemplate(trayIconTemplatePath, 32)
+  ])
+  return { appIcon, trayIcon }
+}
+
+function applySystemIcons(icons: { appIcon: NativeImage; trayIcon: NativeImage }) {
+  appWindowIcon = icons.appIcon
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setIcon(icons.appIcon)
+  tray?.setImage(icons.trayIcon)
 }
 
 env.cacheDir = path.join(app.getPath('userData'), 'speech-model-cache')
@@ -588,6 +632,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width,
     height,
+    icon: appWindowIcon,
     ...windowPosition,
     minWidth: 370,
     minHeight: 500,
@@ -1048,9 +1093,11 @@ function registerIpc() {
     }
     return settings
   })
-  ipcMain.handle('settings:save', (event, next: AssistantSettings) => {
+  ipcMain.handle('settings:save', async (event, next: AssistantSettings) => {
     if (event.sender !== mainWindow?.webContents) throw new Error('Settings can be changed only in the Nova chat window.')
+    const systemIcons = await createSystemIcons(next)
     const saved = persistSettings(next)
+    applySystemIcons(systemIcons)
     const validIds = new Set(saved.apiIntegrations.map((integration) => integration.id))
     const nextCredentials = Object.fromEntries(Object.entries(apiCredentials).filter(([id]) => validIds.has(id)))
     if (Object.keys(nextCredentials).length !== Object.keys(apiCredentials).length) persistApiCredentials(nextCredentials)
@@ -1488,8 +1535,10 @@ function registerIpc() {
 
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   loadSettings()
+  const systemIcons = await createSystemIcons(settings)
+  applySystemIcons(systemIcons)
   registerIpc()
   const assistantSession = session.defaultSession
   assistantSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
@@ -1510,8 +1559,7 @@ app.whenReady().then(() => {
       mainWindow.webContents.send('speech:progress', { status: 'error', message: error instanceof Error ? error.message : 'Could not load the local speech model.' } satisfies SpeechProgress)
     }
   })
-  const icon = nativeImage.createFromDataURL(`data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="10" fill="#a6f28a"/><path d="M10 17c0-4 2-7 6-7s6 3 6 7v4h-3v-4c0-2-1-4-3-4s-3 2-3 4v4h-3z" fill="#151714"/></svg>')}`)
-  tray = new Tray(icon)
+  tray = new Tray(systemIcons.trayIcon)
   updateTrayBranding()
   tray.on('click', toggleChat)
   app.on('activate', openChat)

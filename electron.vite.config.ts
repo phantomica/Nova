@@ -9,16 +9,25 @@ const canonicalProjectRoot = realpathSync.native(projectRoot)
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
-    build: { rollupOptions: { input: { index: resolve(projectRoot, 'electron/main.ts') } } }
+    build: {
+      outDir: resolve(projectRoot, 'dist/main'),
+      rollupOptions: { input: { index: resolve(projectRoot, 'electron/main.ts') } }
+    }
   },
   preload: {
     plugins: [externalizeDepsPlugin()],
-    build: { rollupOptions: { input: { index: resolve(projectRoot, 'electron/preload.ts') } } }
+    build: {
+      outDir: resolve(projectRoot, 'dist/preload'),
+      rollupOptions: { input: { index: resolve(projectRoot, 'electron/preload.ts') } }
+    }
   },
   renderer: {
     root: projectRoot,
     plugins: [react()],
     server: { fs: { allow: [projectRoot, canonicalProjectRoot] } },
-    build: { rollupOptions: { input: 'index.html' } }
+    build: {
+      outDir: resolve(projectRoot, 'dist/renderer'),
+      rollupOptions: { input: 'index.html' }
+    }
   }
 })

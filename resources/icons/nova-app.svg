@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect x="8" y="8" width="240" height="240" rx="62" fill="{{BACKGROUND_COLOR}}"/>
+  <path d="M128 27c8.5 61.5 39.5 92.5 101 101-61.5 8.5-92.5 39.5-101 101-8.5-61.5-39.5-92.5-101-101 61.5-8.5 92.5-39.5 101-101Z" fill="{{ACCENT_COLOR}}"/>
+  <circle cx="190" cy="64" r="9" fill="#e5f7dc"/>
+</svg>
