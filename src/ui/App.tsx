@@ -2,10 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ArrowUpRight, AudioLines, ChevronDown, ChevronRight, CircleHelp,
   LoaderCircle, Mic, MicOff, Minus, Square, Settings2, ShieldCheck, Sparkles,
-  Volume2, VolumeX, X
+  Trash2, Volume2, VolumeX, X
 } from 'lucide-react'
 import type { ActionTrace, AssistantActivity, AssistantSettings, LocationAccessResolution, OllamaMessage, PendingApiAction, PendingApplicationClose, PendingApplicationLaunch, PendingChange, PendingLocationAccess } from '../shared'
-import { apiTools, enabledTools } from './agent-tools'
+import { apiTools, enabledTools, getRequestedGroups, isContextualFollowUp, type ToolGroup } from './agent-tools'
 import { ChatText, decodeForWhisper, plainTextForSpeech } from './formatting'
 import { ActionTraceCard, ChangeCard, FloatingButton, SettingsPanel, SpeechBubble, assistantSystemPrompt } from './components'
 
@@ -58,6 +58,7 @@ function ChatApp() {
   const settingsRef = useRef<AssistantSettings | null>(settings)
   const sendRef = useRef<(text: string) => Promise<void>>(async () => {})
   const messageHistory = useRef<OllamaMessage[]>([{ role: 'system', content: '' }])
+  const lastToolGroupsRef = useRef<ToolGroup[]>([])
   settingsRef.current = settings
 
   useEffect(() => {
@@ -205,11 +206,18 @@ function ChatApp() {
     setError('')
     setBusy(true)
     setMessages((old) => [...old, { id: crypto.randomUUID(), role: 'user', content: text }])
-    const history = [...messageHistory.current, { role: 'user' as const, content: text }]
-    messageHistory.current = history
     try {
-      const availableTools: object[] = enabledTools(settings)
-      if (settings.apiAccessEnabled) availableTools.push(...apiTools(settings.apiIntegrations))
+      if (!isContextualFollowUp(text)) {
+        const groups = getRequestedGroups(text, settings, settings.apiIntegrations)
+        if (groups.size) lastToolGroupsRef.current = [...groups]
+      }
+      const availableTools: object[] = enabledTools(settings, text, settings.apiIntegrations, lastToolGroupsRef.current)
+      if (settings.apiAccessEnabled) availableTools.push(...apiTools(settings.apiIntegrations, text, settings, lastToolGroupsRef.current))
+      const history = [
+        { role: 'system' as const, content: assistantSystemPrompt(settings, text, lastToolGroupsRef.current) },
+        ...messageHistory.current.slice(1),
+        { role: 'user' as const, content: text }
+      ]
       let response = await window.desktop.chat(requestId, settings.ollamaUrl, settings.model, history, availableTools)
       if (cancelledChatRequestsRef.current.has(requestId)) return
       history.push(response)
@@ -331,8 +339,11 @@ function ChatApp() {
       }
       if (cancelledChatRequestsRef.current.has(requestId)) return
       if (response.tool_calls?.length) throw new Error('The model reached the five-step action limit. Try breaking the request into smaller steps.')
+      const content = response.content?.trim()
+      if (!content) {
+        throw new Error('The model returned an empty final response. Tool results are shown above, but Nova did not summarize them.')
+      }
       messageHistory.current = history
-      const content = response.content || 'Done.'
       setMessages((old) => [...old, { id: crypto.randomUUID(), role: 'assistant', content }])
       window.desktop.publishBubble(content, pendingBubbleChangesRef.current, pendingBubbleApplicationLaunchesRef.current, pendingBubbleApplicationClosesRef.current)
       say(content)
@@ -775,6 +786,18 @@ function ChatApp() {
     finally { setBusyChange('') }
   }
 
+  const clearChat = () => {
+    if (!settings || busy) return
+    const pendingActions = messages.filter((message) =>
+      message.change || message.apiAction || message.applicationLaunch || message.applicationClose || message.locationAccess)
+    lastToolGroupsRef.current = []
+    messageHistory.current = [{ role: 'system', content: assistantSystemPrompt(settings) }]
+    setMessages(pendingActions)
+    setError('')
+    window.speechSynthesis?.cancel()
+    setSpeaking(false)
+  }
+
   if (typeof window.desktop !== 'object') return <div className="bridge-error">
     <div className="brand-icon"><Sparkles size={18} /></div>
     <h1>Nova needs its desktop bridge</h1>
@@ -787,7 +810,11 @@ function ChatApp() {
     <header className="topbar">
       <div className="brand"><div className="brand-icon"><Sparkles size={16} /></div><div className="brand-copy"><b>{settings.appName}</b><span>LOCAL AI INTERFACE</span></div></div>
       <div className="topbar-status"><span className={`status-dot ${modelReady === false ? 'offline' : ''}`} />{modelReady === false ? 'Model offline' : settings.model}</div>
-      <div className="window-actions"><button className="icon-button" onClick={() => setSettingsOpen(true)} title="Settings" aria-label="Settings"><Settings2 size={17} /></button><button className="icon-button window-hide" onClick={() => window.desktop.hideAssistant()} title="Hide Nova" aria-label="Hide Nova"><Minus size={17} /></button></div>
+      <div className="window-actions">
+        <button className="icon-button" onClick={clearChat} disabled={busy || messages.length === 0} title="Clear conversation and model context; keep pending approvals" aria-label="Clear chat"><Trash2 size={16} /></button>
+        <button className="icon-button" onClick={() => setSettingsOpen(true)} title="Settings" aria-label="Settings"><Settings2 size={17} /></button>
+        <button className="icon-button window-hide" onClick={() => window.desktop.hideAssistant()} title="Hide Nova" aria-label="Hide Nova"><Minus size={17} /></button>
+      </div>
     </header>
     <main className="conversation" aria-label="Chat messages">
       {modelReady === false && <button className="connection-notice" onClick={() => setSettingsOpen(true)}><CircleHelp size={16} /><span><b>Can’t find your model.</b> Check Ollama and model settings.</span><ChevronRight size={16} /></button>}

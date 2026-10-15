@@ -74,6 +74,7 @@ html:has(.floating-root), html:has(.bubble-root), body:has(.floating-root), body
 .window-actions { display: flex; align-items: center; gap: 5px; }
 .icon-button { display: grid; place-items: center; width: 31px; height: 31px; padding: 0; border: 0; border-radius: 9px; background: transparent; color: #a0a69d; cursor: pointer; -webkit-app-region: no-drag; transition: background .15s, color .15s; }
 .icon-button:hover { background: #272c26; color: #f1f2eb; }
+.icon-button:disabled { opacity: .4; cursor: default; }
 .conversation { flex: 1; overflow: auto; padding: 14px 17px 10px; scrollbar-width: thin; scrollbar-color: #394036 transparent; }
 .date-divider { display: flex; align-items: center; gap: 12px; margin: 15px 0 21px; color: #6f776c; font-size: 8px; font-weight: 700; letter-spacing: 1.45px; }
 .date-divider::before, .date-divider::after { height: 1px; flex: 1; content: ''; background: var(--border); }
